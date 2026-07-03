@@ -136,10 +136,52 @@ independent of VS's 12/48/240.
 
 ## Performance
 
-- Cadence: the vanilla half-second power tick, on the game's power worker
-  thread. dt = 0.5 s, DC + storage dynamics; no subcycling.
-- Thread contract: manatee-core's zero-allocation steady state and
-  no-Unity-API rule exist for this environment (solver.md).
+- Cadence: dt = 0.5 s, DC + storage dynamics; no subcycling.
+
+### Threading (verified against decompiled game source, 2026-07-03)
+
+Decompiled from the shipping `Assembly-CSharp.dll`; file:line references are
+to the ILSpy output.
+
+- **There is no dedicated power thread.** The entire simulation runs inside
+  one async loop, `GameManager.GameTick` (`GameManager.cs:714`): it does
+  `UniTask.SwitchToThreadPool()` (:745), then runs **all atmospherics steps,
+  then `ElectricityManager.ElectricityTick()` (:793), then logic/rooms/
+  cartridges, sequentially on that one ThreadPool thread**, then switches
+  back to the main thread. `PowerTick.Initialise/CalculateState/ApplyState`
+  run contiguously per network inside `CableNetwork.OnPowerTick()`
+  (`CableNetwork.cs:277`). The old `ThreadedManager`-based Electricity/
+  Atmospherics worker threads still spawn but run an empty work loop —
+  vestigial after a refactor (neither overrides `ThreadedWork()`).
+- **Cadence is a self-clocked 500 ms** (`DefaultTickSpeedMs = 500`,
+  `GameManager.cs:150`): a stopwatch-paced loop padded with 1 ms delays to
+  500 ms. Not an OS timer, not per-frame.
+- **No watchdog, no deadline.** A long tick just stretches the cycle — for
+  power AND atmospherics AND everything else in the shared body. Exceptions
+  are caught, logged, and the loop continues. (Decompile caveat: the pad
+  loop tests `Elapsed.Milliseconds` — the 0–999 component — not
+  `TotalMilliseconds`, so a >1 s body could re-enter the pad loop; possibly
+  an ILSpy artifact, worth flagging upstream.)
+- **Thread identity is not stable**: the sim body may land on a different
+  pool thread each cycle. Nothing may key state to thread ID;
+  `ThreadedManager.IsThread` works because it tests "not the main thread,"
+  not a specific worker.
+- **Sim is host-only**: `RunSimulation => !NetworkManager.IsClient`; clients
+  receive serialized power state. The solver runs only on the host/server.
+
+**Design consequences.** Manatee's per-tick solve is in-band with
+atmospherics, so its cost directly extends the global 500 ms cycle: keep it
+small in absolute terms, not relative to 500 ms. Steady-state tier-1/2
+solves at post-compaction sizes are microseconds — invisible. The expensive
+paths (tier-3 island rebuilds; the load-time rebuild-everything case) get
+offloaded to a background task with a one-tick handoff: the network runs on
+the previous solution (or the scalar fallback) until the rebuild lands.
+The game's own idioms cover the mechanics — snapshot inputs under lock as
+`PowerTick.Initialise` already does (`PowerTick.cs:59-70`), compute
+off-band, marshal results back via `UniTask.SwitchToMainThread()` /
+`.Forget()` (the `SetPowerFromThread` pattern, `Device.cs:1333`) or
+`UnityMainThreadDispatcher.Enqueue`. There is no Job System or `Task.Run`
+in the sim path to piggyback on; UniTask is the house style.
 - Scale: Sukasa's saves show 100–200 cables/network; large bases reach ~10k
   cables and ~100 devices. Series compaction is the load-bearing
   optimization; load-time full rebuild of all networks is benchmarked
