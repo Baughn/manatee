@@ -1,6 +1,6 @@
 # Manatee — Design Document
 
-Last updated: 2026-07-02
+Last updated: 2026-07-05
 Status: Requirements interview complete; layer docs in progress.
 
 **Manatee** (from MNA) is an electrical-simulation core built on Modified
@@ -237,7 +237,7 @@ Summary here; the full treatment goes in [solver.md](solver.md).
 
 - **DC (Stationeers):** dt = 0.5 s (the vanilla power tick), Backward Euler
   for storage dynamics. No subcycling needed.
-- **Transient (VS DC-side):** dt = game tick; component values chosen so time
+- **Transient (VS DC-side):** dt = the 50 ms electrical tick; component values chosen so time
   constants live at human-visible scales (0.1–10 s), where BE at ~50 ms is
   accurate — the EA trick, now documented in EA's own examples README.
 - **AC (VS):** islands driven by sinusoidal sources at the generator's
@@ -246,6 +246,14 @@ Summary here; the full treatment goes in [solver.md](solver.md).
   back-substitutions per substep. AC↔DC boundaries (rectifier-flavored
   devices, if/when they exist) are behavioral two-ports coupling islands, so
   each island stays linear in its own domain.
+- **Island coupling (transformers):** two device classes, EA-style
+  (settled 2026-07-05). *Idealized* transformers (small, local) are
+  same-matrix two-ports; *decoupling* transformers (utility-scale,
+  pole-to-network) are island boundaries. Gameplay steers long-distance
+  transfer toward decoupling types — exactly where thread isolation pays.
+  Boundaries exchange amplitude+phase per substep, damped by explicit
+  relaxation (solver.md, Islands); lessons that teach reactive behavior
+  use idealized transformers (curriculum.md).
 - **Nonlinearity budget:** Newton iteration exists (diodes in the tablet
   curriculum need it) but is kept out of the per-substep hot path in world
   islands wherever a behavioral model serves.
@@ -337,6 +345,27 @@ job via wheel gearing, pole count, and transformers.
   themselves are frequency-indifferent; frequency matters through flicker,
   transformers, and (later) motors.
 
+### Grounding model
+
+Settled 2026-07-05. The starter wiring idiom is **ground-return** (SWER —
+single-wire earth return, real rural-grid engineering): one conductor out,
+the earth back. Earth is an ordinary solver node reached through
+**per-electrode contact resistance** (tens of ohms, better when wet), so
+grounding-rod quality is a real, teachable parameter — and "bare
+conductors ground when wet" falls out of the same mechanism. Because
+earth is the return conductor, every island touches the ground reference
+and R12's shock-relative-to-ground is always defined.
+
+Two-wire circuits are not a separate system — running an insulated return
+just works — and a deliberately *floating* system (isolation transformer +
+insulated return) is an advanced build with real safety semantics: one
+wire of a floating system is safe to touch, and the shock rule there is
+touching two points of it. CPU was not the deciding factor (two-wire
+roughly doubles node count — still microseconds at post-compaction sizes);
+the cost of two-wire-everywhere would have been placement friction (R13).
+Stationeers keeps vanilla single-conductor semantics with a local
+reference per network — a per-client choice; the core doesn't care.
+
 ### Elevator control: pure electromechanics
 
 The elevator's control system is not a separate signal network — it is just
@@ -388,14 +417,14 @@ Summary; full treatment in [stationeers.md](stationeers.md).
   its own.
 - Persistence: device state rides the vanilla driver; network/solver state
   needs our own save/load hook (Sukasa confirms feasible).
-- Legacy-device adaptor per R17; Harmony-injected `MNACableNetwork` carries
+- Legacy-device adaptor per R18; Harmony-injected `MNACableNetwork` carries
   the network→nodes mapping.
 
 ## Performance Targets
 
 | Context | Target |
 | --- | --- |
-| VS server tick (33 ms) | ≤ 5 ms on-thread, ≤ 20 ms off-thread; aspire to less on-thread |
+| VS electrical tick (50 ms — our own tick listener; VS mods choose their interval) | ≤ 5 ms on-thread, ≤ 20 ms off-thread; aspire to less on-thread |
 | VS largest sensible base | ~few hundred components post-compaction (mostly cable resistors, ~a dozen motors) |
 | VS threading | transformers are isolation points; islands schedule across workers |
 | Stationeers | fit inside Re-Volt's half-second power tick on its worker thread; ~10k raw cables compact to a graph in the low hundreds |
@@ -454,6 +483,27 @@ voltage/frequency standards (12 V / 48 V / 240 V; 5 Hz natural, 50 Hz via
 pole count), and delivery order. Earlier rounds resolved microblock
 dual-occupancy (→ R17) and the room-heat and catenary-rendering surfaces
 (→ vintage-story.md).
+
+Doc-review round (2026-07-05) resolved: electrical tick = 50 ms (VS mods
+own their tick listener interval; the earlier 33 ms figure was spurious);
+transformer types split idealized (same-matrix) vs decoupling (island
+boundary); the relay-vs-breaker duality (netlist switch vs island-coupling
+device — solver.md); switch on/off resistances tightened to
+SPICE-conventional values plus an explicit conductance-range policy
+(solver.md, Numerics); AC substep count quantized with hysteresis; adapted
+Stationeers generators get internal series resistance and an across-tick
+current clamp; island rebuilds coalesce to once per tick; limit
+attribution is a per-limit-type, environment-adjusted envelope
+(compaction.md); the oscilloscope contract is two probes. A same-day
+follow-up resolved the remainder: boundary couplings exchange
+amplitude+phase per substep with explicit relaxation (physical transformer
+storage is modeled but not relied on; DC converter two-ports carry a real
+DC-link capacitor — solver.md, Islands); grounding is ground-return/SWER
+as the starter idiom with earth as an ordinary node behind per-electrode
+contact resistance (see Grounding model); and the solver backend is an
+interface — in-house zero-alloc dense LU primary, CSparse.NET as interim
+large-island fallback, in-house sparse refactor only if benchmarks demand
+(solver.md, Numerics).
 
 Deferred by design: chemistry-arc details (batteries ship as behavioral
 electrical models; manatee-core avoids electrical-only naming in its deepest

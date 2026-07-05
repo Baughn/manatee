@@ -49,7 +49,8 @@ see `third_party/CLAUDE.md` for what's there and the decompile caveats.
 ## Practical notes
 
 - VCS is **jj** (colocated git). `third_party/stationeers-decomp/` is
-  gitignored proprietary output — keep it that way.
+  gitignored proprietary output — keep it that way. Commit with `jj commit`
+  at convenient points, e.g. after a logical unit of work.
 - NixOS: missing tools via `nix run nixpkgs#<pkg> --`. ngspice (test oracle)
   and ilspycmd (decompiler) are used this way; neither ships with the
   project.

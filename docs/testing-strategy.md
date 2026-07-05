@@ -1,6 +1,6 @@
 # Testing Strategy
 
-Last updated: 2026-07-02
+Last updated: 2026-07-05
 Status: DRAFT.
 
 The team's constraint shapes the whole strategy: nobody here is an
@@ -112,7 +112,14 @@ Two paths, same answer — these carry the compaction layer:
   through the knee; must converge or Fault legibly — never NaN, never hang.
 - Adaptor stability (Stationeers): randomized constant-power load sets
   under falling supply; must settle or brown out within k ticks, never
-  oscillate unboundedly.
+  oscillate unboundedly. The same harness covers island-coupling
+  boundaries (decoupling transformers, converter two-ports; per-substep
+  amplitude+phase exchange with relaxation — solver.md, Islands):
+  randomized load steps across a boundary must settle, never ring
+  unboundedly.
+- Conductance-range sweep: random circuits with component values spanning
+  the full legal conductance range (solver.md numerics policy); solutions
+  must stay finite and within oracle tolerance across the spread.
 
 ## Benchmarks
 

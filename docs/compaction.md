@@ -1,6 +1,6 @@
 # manatee-core: Reduction Layer ("compaction")
 
-Last updated: 2026-07-02
+Last updated: 2026-07-05
 Status: DRAFT.
 
 Implements design.md R10–R11. Sits between clients and the netlist: clients
@@ -22,12 +22,18 @@ to route observations and events back to geometry. Sparky's
 3. **Probe interpolation** — eliminated interior nodes remain observable:
    voltages interpolate by resistance ratio along the collapsed chain, so
    instruments can read "inside" a compacted run.
-4. **Limit attribution** — each collapsed element carries metadata for its
-   weakest constituent (smallest cross-section, lowest-rated segment,
-   per-material thresholds). When the solver raises a limit event on the
-   equivalent resistor, this layer answers *which voxel/segment* melts,
-   burns, or pops. Current density at the narrowest cross-section is the
-   attribution rule.
+4. **Limit attribution** — each collapsed element carries a **limit
+   envelope**: the per-limit-type minimum over its constituents.
+   Instantaneous ampacity, i²t thermal mass, and melting threshold can
+   each pick a *different* segment in a mixed-material chain — which is
+   exactly the lead-fuse-in-a-copper-run case. Thresholds are
+   environment-adjusted per segment (ambient temperature; Stationeers
+   spans −150 °C on Europa to +800 °C on Vulcan): an environment change
+   dirties the envelope, a metadata-only recompute — never a matrix
+   change. When the solver raises a limit event on the equivalent
+   resistor, this layer answers *which voxel/segment* melts, burns, or
+   pops; current density at the narrowest cross-section is the
+   attribution rule, evaluated per limit type.
 5. **Island bookkeeping** — connectivity union-find feeding solver.md's
    islands: incremental merge on additions; removal invalidates and rebuilds
    the affected island (no incremental split detection — design.md R11).
@@ -42,7 +48,9 @@ Carried over from sparky (design, not code):
   full rebuild of the affected island; otherwise the incremental path.
 - Pure-addition fast path: growing an existing region without removals
   touches only the dirty area.
-- Any removal ⇒ island rebuild.
+- Any removal ⇒ island rebuild, **coalesced**: removals mark the island
+  dirty and the rebuild runs at most once per tick, at solve time — a
+  deconstruction burst costs one rebuild, not one per removed segment.
 
 **Resync backstop:** the from-scratch build is always available and cheap at
 island scale. A validation mode rebuilds in the background and diffs against

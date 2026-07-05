@@ -1,6 +1,6 @@
 # manatee-core: Solver
 
-Last updated: 2026-07-02
+Last updated: 2026-07-05
 Status: DRAFT — API shape and analysis design; no code yet.
 
 Implements design.md requirements R1–R9. Game-agnostic, pure C#, no engine
@@ -49,7 +49,7 @@ VSourceId    AddVoltageSource(NodeId pos, NodeId neg, double volts);
 ISourceId    AddCurrentSource(NodeId from, NodeId to, double amps);
 CapacitorId  AddCapacitor(NodeId a, NodeId b, double farads);
 InductorId   AddInductor(NodeId a, NodeId b, double henries);
-SwitchId     AddSwitch(NodeId a, NodeId b, bool closed);   // netlist-level: G toggles 1e9/1e-9
+SwitchId     AddSwitch(NodeId a, NodeId b, bool closed);   // relay contact: 1 mΩ closed / 1 GΩ open (see Numerics)
 DiodeId      AddDiode(NodeId anode, NodeId cathode, DiodeParams p);
 void         Remove(ComponentId id);                        // any typed id
 
@@ -103,7 +103,8 @@ One netlist, multiple analyses (R2). Components provide a time-domain stamp;
 a complex-frequency stamp is a later addition (phasor metering optimization
 only — R3 makes waveform the primary mode).
 
-**DC operating point** (`dt <= 0`): capacitors open, inductors ~1 nΩ shorts.
+**DC operating point** (`dt <= 0`): capacitors open, inductors ~1 mΩ
+shorts (conductance-range policy — see Numerics).
 Stationeers runs exclusively here plus storage dynamics at dt = 0.5 s.
 
 **Transient**: Backward Euler companion models (L-stable; the "boring but
@@ -117,7 +118,12 @@ highest source frequency at ≥ 20 samples/cycle (5 Hz → 100 Hz substep rate �
 5 substeps per 50 ms tick; 50 Hz via pole count → ~50 substeps). Linear
 islands pay tier-1 costs only. Sources are updated per substep by a source
 driver (phase-continuous across ticks; frequency is a piecewise-constant
-input from the mechanical network, updated at its ~100 ms cadence).
+input from the mechanical network, updated at its ~100 ms cadence). N is
+quantized with hysteresis: the substep count changes only when the
+required rate drifts past ~±15%, so dt — and with it every BE companion
+conductance — holds constant across mechanical-speed jitter; the source
+driver tracks the *exact* frequency through its per-substep phase
+increment (tier 1). An N change is a deliberate, rare tier-2 event.
 
 **Nonlinear elements**: Newton-Raphson, re-stamping linearized companions
 per iteration (tier 2 each), dual convergence test (scaled step norm AND
@@ -136,10 +142,12 @@ tier-1 source updates.
 Solver primitives: resistor, V/I sources, capacitor, inductor, switch,
 diode. Everything else is a `devices`-layer composition:
 
-- **Transformer**: ideal two-port (turns ratio via coupled auxiliary
-  equations) + leakage/magnetizing elements as parameters. Doubles as the
-  island *coupling* device where thread isolation is wanted (VS) — see
-  compaction.md.
+- **Transformer**: two device classes (EA precedent, settled 2026-07-05).
+  *Idealized* (small/local): ideal two-port (turns ratio via coupled
+  auxiliary equations) + leakage/magnetizing elements as parameters,
+  living in the same matrix/island. *Decoupling* (utility-scale): an
+  island boundary — see Islands. Gameplay steers long-distance transfer
+  toward decoupling types, which is exactly where thread isolation pays.
 - **Converter two-ports** (rectifier-flavored, chargers): behavioral power
   transfer with efficiency curve between two islands; enforce own limits;
   keep both sides linear. No semiconductor-level simulation in world
@@ -162,15 +170,33 @@ unit of parallelism. The islands layer:
 - Accepts **pre-partitioned** input (Stationeers hands us CableNetworks) or
   **self-partitioned** (VS/tablet) — islanding is core but optional per
   client.
-- **Coupling devices** (transformers, converter two-ports, Stationeers
-  breakers) join islands *logically* while keeping them separate matrices
-  when the device is a power-transfer boundary, or merge them when it is a
-  direct electrical bridge (closed breaker = same matrix). The distinction
-  is per-device-type: galvanic connection ⇒ same island; power-transfer
-  boundary ⇒ separate islands, coupled by exchanged P/V values with one-tick
-  lag. One-tick-lag coupling is stable because both sides have storage; the
-  coupling device clamps transfer to what its source island actually
-  delivered (no free energy).
+- **Coupling devices** (decoupling transformers, converter two-ports,
+  Stationeers breakers) join islands *logically* while keeping them
+  separate matrices when the device is a power-transfer boundary, or merge
+  them when it is a direct electrical bridge (closed breaker = same
+  matrix). The distinction is per-device-type: galvanic connection ⇒ same
+  island; power-transfer boundary ⇒ separate islands, coupled by exchanged
+  values with bounded lag. The coupling device clamps transfer to what its
+  source island actually delivered (no free energy). Exchange scheme
+  (settled 2026-07-05): AC boundaries exchange amplitude+phase per
+  *substep* — one substep of lag is 1/20 cycle, versus a quarter cycle for
+  per-tick lag at 5 Hz — damped by explicit relaxation (exponential
+  smoothing on the exchanged values; α tunable per device type). The
+  transformer's own leakage/magnetizing storage is modeled as honest
+  device elements but not relied on for stability: its time constants
+  (~ms at rated load) are shorter than a substep. DC converter two-ports
+  (Stationeers) get storage by construction instead — a real,
+  honestly-sized DC-link capacitor, whose job in a real converter is
+  exactly this smoothing. Stability is enforced, not assumed: the
+  adaptor-stability property test extends to boundary couplings
+  (testing-strategy.md).
+- **Relay-vs-breaker duality** (settled 2026-07-05): same physics,
+  different API citizenship, chosen per device type. A *relay contact* is
+  a netlist switch — tier 2, stays inside its island's matrix; the hot
+  path for elevator-style control logic. A *breaker* is a coupling device:
+  closed = islands merged, open = separate; the opening transition is an
+  island rebuild (tier 3 — the honest cost), acceptable because breakers
+  are safety devices that change rarely.
 - Islands solve in parallel (worker pool supplied by the client — the core
   never owns threads).
 
@@ -192,14 +218,33 @@ diagonals to keep floating subgraphs non-singular.
 - **Probes**: named observation points surviving reduction. The reduction
   layer registers interpolators for eliminated nodes so instruments can read
   "inside" compacted runs. Oscilloscope support: a probe can subscribe to
-  per-substep sampling into a ring buffer (one probe at a time is the
-  expected UI contract; cost is bounded).
+  per-substep sampling into a ring buffer (two probes at a time is the
+  expected UI contract — phase comparisons need a pair; cost is bounded).
 
 ## Numerics
 
-- **CSparse.NET** for sparse LU (LGPL — separate unmodified DLL; MIT core).
+- Backend plan (settled 2026-07-05): a solver-backend interface from day
+  one. CSparse.NET (LGPL — separate unmodified DLL; MIT core) exposes
+  neither pattern-reusing numeric refactorization nor allocation-free
+  solves, so it cannot carry tier 2 or the zero-alloc gate. Therefore: an
+  in-house zero-alloc dense LU is the primary backend (post-compaction
+  islands are small enough that it covers nearly everything, and dense has
+  no symbolic phase to reuse — tier 2 is trivially supported); CSparse.NET
+  is retained behind the interface as the interim large-island fallback
+  (allocations tolerated there); an in-house KLU-style sparse refactor is
+  written only if benchmarks demand it. (Native KLU/SuiteSparse via
+  P/Invoke was rejected: per-platform native binaries are a
+  mod-distribution burden.)
 - Dense in-place LU with partial pivoting below ~100 unknowns or above ~0.18
   density (sparky's measured crossover; re-benchmark, don't assume).
+- Conductance-range policy (settled 2026-07-05): stamped conductances live
+  in [1e-9, 1e3] S — 1 GΩ open switch … 1 mΩ closed switch / DC inductor
+  short (SPICE-conventional) — with gmin = 1e-12 S. Rationale: doubles
+  carry ~16 significant digits; the earlier 1e9-S/1e-12-S spread
+  (21 decades) hits the conditioning cliff on exactly the pathological
+  builds R9 promises. Debug builds warn when an island's extreme
+  conductance ratio exceeds 1e12; a fuzz axis sweeps values across the
+  full legal range (testing-strategy.md).
 - Symbolic/numeric factorization split for tier 2 (this is the main numeric
   improvement over sparky).
 - Complex-valued solve path deferred until phasor metering is wanted; the
@@ -230,7 +275,10 @@ The acceptance bar is Re-Volt's worker thread (the stricter environment):
 
 - No engine/Unity/VS API anywhere in manatee-core.
 - Steady-state ticking (tiers 1–2) allocates zero bytes after warmup;
-  BenchmarkDotNet MemoryDiagnoser enforces this in CI.
+  BenchmarkDotNet MemoryDiagnoser enforces this in CI. (Enforced on the
+  in-house dense path, which covers post-compaction island sizes; the
+  CSparse large-island fallback is exempt until/unless the in-house sparse
+  refactor lands — see Numerics.)
 - All solver state is confined to its island; islands are independently
   lockable; the API is single-writer-per-island, enforced by debug asserts
   rather than locks (clients own scheduling).

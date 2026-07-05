@@ -1,6 +1,6 @@
 # Curriculum
 
-Last updated: 2026-07-02
+Last updated: 2026-07-05
 Status: DRAFT — arc and format settled; individual lessons to be authored.
 
 The tablet's lesson set, per design.md R16/R20. Ceiling: **AC power**
@@ -73,3 +73,7 @@ at game tick rates (documented per lesson).
 - Real-world truthfulness check: any statement about reality (not just the
   sim) gets reviewed against a real reference before shipping — the
   educational mission makes errors here worse than bugs.
+- Transformer lessons use the *idealized* transformer class (design.md,
+  Simulation Model): a decoupling boundary launders reactive power, so
+  power-factor and impedance behavior must be demonstrated same-island.
+  The tablet uses idealized transformers throughout.

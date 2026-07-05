@@ -1,7 +1,8 @@
 # Vintage Story Client
 
-Last updated: 2026-07-02
-Status: DRAFT — engine-integration facts recorded; design sections to follow.
+Last updated: 2026-07-05
+Status: DRAFT — engine-integration facts recorded; tablet-host defaults
+reviewed 2026-07-05.
 
 Companion to [design.md](design.md). This doc covers the VS-specific layer:
 voxel extraction, engine integration seams, devices, and the tablet host.
@@ -11,10 +12,11 @@ Engine references are against the public source checkouts at repo root
 ## Table of Contents
 
 1. [Microblock Integration (R17)](#microblock-integration-r17)
-2. [Mechanical Network Coupling (R14)](#mechanical-network-coupling-r14) — TODO
-3. [Rooms and Heat](#rooms-and-heat) — TODO
-4. [Tooltips and Instruments (R15)](#tooltips-and-instruments-r15) — TODO
-5. [Wire Rendering](#wire-rendering) — TODO
+2. [Mechanical Network Coupling (R14)](#mechanical-network-coupling-r14)
+3. [Rooms and Heat](#rooms-and-heat)
+4. [Tooltips and Instruments (R15)](#tooltips-and-instruments-r15)
+5. [Wire Rendering](#wire-rendering)
+6. [The Tablet Host](#the-tablet-host)
 
 ---
 
@@ -107,8 +109,10 @@ Three coexisting representations, consumed uniformly by the extraction layer:
 3. **Surface wiring (optional/later):** decor-layer attachment for
    face-mounted conduit aesthetics.
 
-Open questions tracked in design.md: chisel-protection UX for cable voxels;
-salvage semantics; whether insulation chisels separately from conductor.
+Chisel semantics are settled (design.md, Hazards): cable voxels are never
+protected from the chisel; chiseled-out cable salvages at a loss (wire
+bits); insulation is a separate material and chisels separately; chiseling
+a live conductor shocks you — lockout-tagout as an emergent skill.
 
 ## Mechanical Network Coupling (R14)
 
@@ -226,3 +230,23 @@ Two mechanisms, both needed:
   Gotchas: generous `RenderRange` for long spans; the cloth system
   deliberately avoids region-boundary spans (`ClothManager.cs:583-585`) —
   wire persistence must respect the same limit or handle it explicitly.
+
+## The Tablet Host
+
+Proposed defaults (2026-07-05):
+
+- **Client-side only.** The tablet's islands run entirely on the client;
+  lessons and the sandbox never touch the server. Core determinism holds
+  by contract (solver.md), so lesson goldens behave identically in-game
+  and in CI.
+- **Fixed sim dt (10 ms)**, stepped from the client tick via an
+  accumulator; sim time is decoupled from world time and frame rate.
+  Fixed dt keeps the tablet on the tier-1 fast path.
+- **Paused while closed.** The sim steps only while the GUI is open;
+  reopening resumes from a snapshot (R6).
+- **Persistence:** lesson progress and sandbox netlists ride player
+  attributes as Falstad text — small, human-readable, and the same format
+  the importer already parses.
+- **Instruments:** the tablet scope is the primary consumer of the
+  two-probe contract (solver.md, Probes) — the phase lessons (curriculum
+  15/17) compare two traces.

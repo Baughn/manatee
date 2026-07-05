@@ -1,6 +1,6 @@
 # Stationeers Client (with Re-Volt)
 
-Last updated: 2026-07-02
+Last updated: 2026-07-05
 Status: DRAFT — integration design settled with Sukasa; no code yet.
 
 Implements design.md R18–R19 plus the core requirements as consumed from
@@ -71,7 +71,10 @@ recorded ports.
 
 Fuses and breaker trip curves ride manatee-core limit events, including the
 i²t thermal accumulator, so Re-Volt's existing delayed-burn behavior is
-reproduced by mechanism rather than by special case.
+reproduced by mechanism rather than by special case. Ratings are
+ambient-temperature-adjusted through the compaction layer's limit envelope
+(compaction.md): Europa's −150 °C and Vulcan's +800 °C move real
+thresholds, not special cases.
 
 ## Islands and Coupling Devices
 
@@ -85,8 +88,11 @@ structure *between* networks comes from devices that straddle two networks
   Vanilla network identities never merge; only the solver island does.
 - **Transformer** = power-transfer boundary ⇒ separate islands coupled by
   exchanged P/V per tick (solver.md).
-- Breaker trip/reset is a tier-2 switch toggle plus an island split/join at
-  the union-find level.
+- A breaker is a *coupling device*, not a netlist switch (solver.md's
+  relay-vs-breaker duality, settled 2026-07-05): closed ⇒ the two
+  CableNetworks' islands merge (incremental); open ⇒ they are separate,
+  and the opening transition rebuilds the two halves — cheap
+  post-compaction, and rare by the device's role as a safety device.
 
 ## The Legacy-Device Adaptor
 
@@ -107,6 +113,11 @@ devices are therefore **constant-power elements**, which are nonlinear
   sources at their tier's nominal voltage, with a current limit derived from
   the power they advertise as available. Post-solve, the adaptor reports
   what was actually drawn back through the vanilla provide call.
+- Every adapted source carries a small internal series resistance, so
+  paralleled generators are well-posed (two disagreeing ideal sources in
+  parallel is a designed-in singularity — solver.md failure handling); the
+  advertised-power current limit is enforced by an across-tick clamp,
+  adaptor-style, not by in-solve mode switching. (Settled 2026-07-05.)
 
 Devices are converted to native manatee models one at a time (real stamps,
 device `Tick()`); the two populations coexist indefinitely. Conversion
