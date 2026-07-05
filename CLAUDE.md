@@ -21,7 +21,8 @@ hard *because* real electricity is.
 | `docs/compaction.md` | Reduction layer: series collapse, probe interpolation, limit attribution, incremental maintenance + resync backstop. |
 | `docs/vintage-story.md` | VS client: microblock integration (verified engine facts with file:line), mechanical coupling, rooms/heat, tooltips, wire rendering. |
 | `docs/stationeers.md` | Re-Volt integration: seams, legacy-device adaptor, islands via couplers, verified threading model of the game. |
-| `docs/testing-strategy.md` | ngspice oracles, lesson corpus as CI goldens, invariants, equivalence tests. The math is treated as untrusted input. |
+| `docs/testing-strategy.md` | ngspice oracles, lesson corpus as CI goldens, invariants, equivalence tests, toolchain. The math is treated as untrusted input. |
+| `docs/harness.md` | 2D harness / tablet engine: three pure layers (document, interaction SM, display-list view), rendering backends, headless testing model. |
 | `docs/curriculum.md` | Tablet lesson arc (17 lessons, DC → AC power) and authoring rules. |
 
 `third_party/` holds reference checkouts and the Stationeers decompilation —
@@ -48,6 +49,12 @@ see `third_party/CLAUDE.md` for what's there and the decompile caveats.
 
 ## Practical notes
 
+- Dev environment: `nix develop` (flake pins dotnet-sdk_8 + ngspice).
+  Build/test: `dotnet build Manatee.sln`, `dotnet test Manatee.sln`;
+  fast loop skips the ngspice tests: `dotnet test --filter 'Category!=Oracle'`.
+  Oracle tests hard-fail outside the devshell — that's by design.
+- New files must be `git add`ed before nix sees them (flake evaluation
+  reads the git index; jj reconciles at commit time).
 - VCS is **jj** (colocated git). `third_party/stationeers-decomp/` is
   gitignored proprietary output — keep it that way. Commit with `jj commit`
   at convenient points, e.g. after a logical unit of work.

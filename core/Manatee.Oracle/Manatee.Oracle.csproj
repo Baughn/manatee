@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Test-only: SPICE deck emission, ngspice subprocess driver, rawfile parsing.
+         Never shipped; net8.0 only. -->
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>Manatee.Oracle</RootNamespace>
+  </PropertyGroup>
+
+</Project>

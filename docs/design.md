@@ -447,9 +447,11 @@ Summary; full treatment in [testing-strategy.md](testing-strategy.md).
 
 ## Repository Layout and Licensing
 
-The repository is **manatee** (jj, colocated git). Planned
-layout: `core/` (manatee-core: solver + shared reduction layer),
-`vintagestory/` (the Manatee mod, including the tablet), `docs/`, and
+The repository is **manatee** (jj, colocated git). Layout: `core/`
+(manatee-core: solver + shared reduction layer, plus tests/oracle/
+benchmarks), `tablet/` (the schematic engine `Manatee.Schematic` and the
+Avalonia dev harness — see [harness.md](harness.md)), `lessons/` (the
+R20 corpus), `vintagestory/` (the Manatee mod, later), `docs/`, and
 `third_party/` for the reference checkouts (`ElectricalAge/`, `revolt/`,
 `vsapi/`, `vsessentialsmod/`, `vssurvivalmod/`, `sparky/`) — reference
 material, not built, not licensed as part of this project. The Stationeers

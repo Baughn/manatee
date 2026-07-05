@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- netstandard2.1: ceiling imposed by Re-Volt's Unity 2022.3; net8.0: Vintage Story mods. -->
+    <TargetFrameworks>netstandard2.1;net8.0</TargetFrameworks>
+    <RootNamespace>Manatee.Core</RootNamespace>
+  </PropertyGroup>
+
+</Project>

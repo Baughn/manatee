@@ -12,7 +12,8 @@ the same answer must agree). The math is treated as untrusted input.
 ## Table of Contents
 
 1. [Principles](#principles)
-2. [Oracle Tests (ngspice)](#oracle-tests-ngspice)
+2. [Toolchain](#toolchain)
+3. [Oracle Tests (ngspice)](#oracle-tests-ngspice)
 3. [The Lesson Corpus as Goldens](#the-lesson-corpus-as-goldens)
 4. [Invariant Checks](#invariant-checks)
 5. [Equivalence Tests](#equivalence-tests)
@@ -36,6 +37,28 @@ the same answer must agree). The math is treated as untrusted input.
   habit).
 - **Trust nothing derived.** Any stamp, companion model, or convergence
   trick must be pinned by at least one oracle test before it ships.
+
+## Toolchain
+
+Settled 2026-07-05, implemented in the repo skeleton:
+
+- **Devshell** (`flake.nix`): `dotnet-sdk_8` + `ngspice`, pinned by
+  `flake.lock`; CI runs `nix develop --command`, so CI and local use the
+  same compiler and the same oracle binary.
+- **Targets:** `Manatee.Core` multitargets `netstandard2.1;net8.0` —
+  the ns2.1 ceiling comes from Re-Volt's Unity 2022.3, net8.0 from VS
+  mods and all dev-side projects. Central package management
+  (`Directory.Packages.props`); warnings are errors.
+- **Frameworks:** xUnit for tests, **CsCheck** for property/fuzz tests,
+  **Verify** for snapshot goldens (display lists, deck emission),
+  BenchmarkDotNet for benches.
+- **Oracle policy:** tests tagged `Category=Oracle` **hard-fail** when
+  ngspice is missing — a silently skipped oracle is the one failure mode
+  this strategy cannot afford. Fast inner loop:
+  `dotnet test --filter 'Category!=Oracle'`.
+- The tablet/harness testing model (event scripts, display-list
+  snapshots, bounded pixel goldens) is specified in
+  [harness.md](harness.md).
 
 ## Oracle Tests (ngspice)
 

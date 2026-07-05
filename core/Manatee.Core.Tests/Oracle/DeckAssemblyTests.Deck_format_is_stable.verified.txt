@@ -1,0 +1,10 @@
+﻿* voltage divider
+V1 in 0 DC 10
+R1 in out 1k
+R2 out 0 1k
+.control
+set filetype=ascii
+op
+write output.raw
+.endc
+.end

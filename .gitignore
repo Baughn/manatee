@@ -1,2 +1,18 @@
 # Generated decompilation of proprietary game code — never commit.
 third_party/stationeers-decomp/
+
+# .NET build artifacts
+bin/
+obj/
+artifacts/
+*.user
+
+# Test/benchmark output
+BenchmarkDotNet.Artifacts/
+TestResults/
+*.received.*
+
+# Nix / direnv
+.direnv/
+result
+result-*

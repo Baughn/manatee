@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- The tablet's engine: document model, Falstad import, interaction
+         state machine, display-list view. Pure — no UI framework imports;
+         consumed by the Avalonia harness and later the VS mod (net8.0). -->
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>Manatee.Schematic</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../core/Manatee.Core/Manatee.Core.csproj" />
+  </ItemGroup>
+
+</Project>
