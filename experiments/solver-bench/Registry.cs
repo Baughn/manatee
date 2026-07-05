@@ -9,5 +9,9 @@ public static class Registry
     public static Func<ISolverBackend>[] Factories =>
     [
         () => new Backends.NaiveDenseBackend(),
+        () => new Backends.DenseLuBackend(),
+        () => new Backends.SparseLuBackend(),
+        () => new Backends.CSparseBackend(),
+        () => new Backends.BandedLuBackend(),
     ];
 }

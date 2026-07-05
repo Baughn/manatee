@@ -1,0 +1,25 @@
+$ 1 5.0E-6 10 50 5
+# Lesson 02 — Parallel branch currents.
+# A 12.0 V bus feeds three branches: 90+10, 190+10, 290+10 ohm.
+# The 10 ohm resistor at the bottom of each branch is a sense resistor:
+# its voltage, divided by 10, is that branch's current.
+# Sense probes read 1.2 V, 0.6 V, 0.4 V => 0.12 A, 0.06 A, 0.04 A.
+# Total draw 0.22 A; the source sees about 54.5 ohm.
+v 0 256 0 128 0 0 0 12.0 0 0
+w 0 128 128 128 0
+w 128 128 256 128 0
+w 256 128 384 128 0
+r 128 128 128 192 0 90
+r 128 192 128 256 0 10
+r 256 128 256 192 0 190
+r 256 192 256 256 0 10
+r 384 128 384 192 0 290
+r 384 192 384 256 0 10
+w 0 256 128 256 0
+w 128 256 256 256 0
+w 256 256 384 256 0
+g 0 256 0 288 0
+O 128 128 128 64 0
+O 128 192 96 192 0
+O 256 192 224 192 0
+O 384 192 352 192 0

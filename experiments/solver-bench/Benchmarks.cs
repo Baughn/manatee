@@ -14,7 +14,11 @@ public sealed class BenchCase
 /// Tier-1 (Solve) and tier-2 (Factorize+Solve) costs per backend × circuit.
 /// Solve is the AC-subcycling hot path — the headline number.
 /// </summary>
-[ShortRunJob]
+// In-process: the repo tree contains sibling copies of this csproj
+// (worktrees, .direnv flake sources) that confuse BDN's project discovery.
+[InProcess]
+[WarmupCount(3)]
+[IterationCount(5)]
 [MemoryDiagnoser]
 public class SolveBenchmarks
 {
@@ -72,7 +76,9 @@ public class SolveBenchmarks
 /// The Stationeers load-time shape: cold Analyze+Factorize+Solve at 10k
 /// (pre-compaction worst case; post-compaction this island is ~100 nodes).
 /// </summary>
-[ShortRunJob]
+[InProcess]
+[WarmupCount(2)]
+[IterationCount(3)]
 [MemoryDiagnoser]
 public class ColdBuildBenchmarks
 {

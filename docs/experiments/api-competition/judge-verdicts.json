@@ -1,0 +1,149 @@
+[
+  {
+    "scores": [
+      {
+        "proposal": "Proposal 1: Four Verbs",
+        "tierLegibility": 9,
+        "zeroAlloc": 9,
+        "islands": 8,
+        "snapshot": 7,
+        "ergonomics": 9,
+        "testability": 5,
+        "total": 47,
+        "notes": "Written for my integration: Building-state handoff with scalar fallback, Reconfigure keeps breaker trips out of edit scopes, and EnterSteadyState's allocation tripwire catches the exact Harmony-mod bug (tier-3 inside CalculateState) that otherwise ships. Polling-only, no callbacks, no journal cursor to babysit — the threading contract is auditable by grep, which is what API stability feels like from my seat. Scars: optional StateKey invites silent cold-start-on-load bugs, and there is no replay/oracle/repro surface at all — when a player's base faults, I'm back to asking for their save file."
+      },
+      {
+        "proposal": "Proposal 2: journal + generational handles",
+        "tierLegibility": 8,
+        "zeroAlloc": 8,
+        "islands": 9,
+        "snapshot": 8,
+        "ergonomics": 6,
+        "testability": 7,
+        "total": 46,
+        "notes": "ClientPartitioned merge rejection enforces vanilla's networks-never-merge invariant in the API instead of trusting my adaptor, and mandatory ExternalKey + StaleHandleException turn compaction bugs into named errors — both are things I'd have wanted three incidents ago. But it's VS-shaped: breaker toggles require TopologyBatch ceremony in my per-tick path (canon says coupler open/close is runtime-normal for Stationeers), there's no Building/last-good state for my 10k-segment background load, and a journal I must remember to drain — with overflow forcing a resync on my worker thread — is a cursor-maintenance trap I've been burned by in other mods' event systems."
+      },
+      {
+        "proposal": "Proposal 3: command log",
+        "tierLegibility": 8,
+        "zeroAlloc": 7,
+        "islands": 5,
+        "snapshot": 9,
+        "ergonomics": 5,
+        "testability": 10,
+        "total": 44,
+        "notes": "ReproBundle with logged boundary exchanges is the dream: a player's pathological base replays offline without their save, and the bit-for-bit snapshot round-trip is the strongest R6 story here. But this is the clever API that bites in year two: dense sequence IDs make replay stability hostage to application order across mod versions, the Command union/facade lockstep is a standing maintenance tax, and R5 is essentially missing — no coupling-device API, no island lifecycle beyond Ok/Faulted, no Building state, attribution hand-waved. Auto-rebase on ring wrap allocates mid-gameplay on my worker thread while calling itself cold-path."
+      }
+    ],
+    "winner": "Proposal 1: Four Verbs",
+    "steal": [
+      "From Proposal 2: ClientPartitioned mode where a commit that would merge across partition keys fails — the API enforces Stationeers' networks-never-merge invariant instead of trusting the adaptor.",
+      "From Proposal 2: make the client-stable key (StateKey/ExternalKey) mandatory on every Add, so restore-by-key after rebuild is the only path and forgotten keys can't silently cold-start device state.",
+      "From Proposal 2: generational handles that fail fast (StaleHandleException in debug, defined error in release) — compaction bugs surface as named errors, not aliasing.",
+      "From Proposal 2: two-level drift backstop — cheap per-island fingerprint every N ticks, full canonical ExternalKey-sorted diff only on mismatch, with typed actionable DriftReport entries.",
+      "From Proposal 3: the flight recorder + ReproBundle — Faulted islands export base+log+state+env fingerprint, with boundary exchanges logged as tier-1 commands so a single island replays without its neighbors.",
+      "From Proposal 3: SpiceDeck.Emit with a deterministic NodeId-to-rawfile-column map and an Unrepresentable component list, so the oracle differ knows its own fidelity (testing-strategy.md made API).",
+      "From Proposal 3: invariants as public readback (CheckInvariants: KCL residual with worst node, energy audit, finiteness) — same code path serves CI, the resync backstop, and the tablet's educational error messages.",
+      "From Proposal 3: tier-budget assertions in CI via per-tick stats (Assert Tier2Refactors == 0 in the standing steady-state test) — Proposal 1's TickStats plus Proposal 3's enforcement habit."
+    ]
+  },
+  {
+    "scores": [
+      {
+        "proposal": "Proposal 1 — Four Verbs (client-ergonomics lens)",
+        "tierLegibility": 9,
+        "zeroAlloc": 9,
+        "islands": 8,
+        "snapshot": 7,
+        "ergonomics": 9,
+        "testability": 6,
+        "total": 48,
+        "notes": "The only proposal that kills the converged-adaptor refactor churn (epsilon no-op Adjust) — without it the Stationeers G=P/V² loop pays tier-2 on every island every tick forever, and I have the scars to prove nobody notices until the profiler does. Zero-alloc is credible in PRACTICE: no events/LINQ/iterators anywhere on the hot surface, Span/IBufferWriter drains, ref-struct DeviceTickContext that closures can't capture, plus TickStats.BytesAllocated and a debug tripwire so the contract is monitored in production, not just in CI. Two watch items: SteadyStateGuard must be a struct or `using(net.EnterSteadyState())` allocates per tick, and testability is thin — no replay, no invariant readback, no oracle deck emission."
+      },
+      {
+        "proposal": "Proposal 2 — generational handles + transactional edits + pollable journal (compaction lens)",
+        "tierLegibility": 8,
+        "zeroAlloc": 8,
+        "islands": 10,
+        "snapshot": 8,
+        "ergonomics": 7,
+        "testability": 7,
+        "total": 48,
+        "notes": "Best R10/R11 fit by far — the journal-replay sync, Clean/RebuildPending coalescing, and fingerprint-then-canonical-diff backstop are exactly how incremental state stays honest, and the AllocationSentinel firing on the first offending tick is the enforcement mechanism I'd have specified myself. But there are no per-tick cost counters (no TickStats equivalent), so a tier boundary that leaks — e.g. SetResistance with no unchanged-value fast path refactoring every tick under the adaptor — is invisible until someone profiles; legible worst-case tiers are not the same as legible actual cost. Minor spec smells: island.Devices enumeration unspecified (enumerator alloc risk), EditReceipt holding a ReadOnlySpan in a non-ref struct, and Ready/Faulted lacks P1's Building state for the 10k-segment background load."
+      },
+      {
+        "proposal": "Proposal 3 — command log / flight recorder (determinism & testability lens)",
+        "tierLegibility": 8,
+        "zeroAlloc": 6,
+        "islands": 5,
+        "snapshot": 10,
+        "ergonomics": 6,
+        "testability": 10,
+        "total": 45,
+        "notes": "The determinism and repro story is untouchable (ReproBundle, bit-for-bit RawVector replay, invariants-as-API, DrainStats budget asserts in CI), and DrainStats is the best tier-leak detector on the panel. But the hottest loop pays a facade→Command-union→Apply-switch indirection plus a 32-byte ring store per tier-1 write, per substep, recorder always on — and the auto-rebase policy allocates SaveCanonical+SaveState mid-steady-state on the sim thread when the ring wraps, which is precisely the 'innocent call that sometimes rebuilds' R8 violation I hunt for. Islands/compaction is the weakest: no coupler lifecycle, no reduction-layer integration, no attribution API, no dirty/Building states — the two game clients would have to invent all of it."
+      }
+    ],
+    "winner": "Proposal 1 — Four Verbs",
+    "steal": [
+      "From Proposal 2: the pollable TopologyJournal (fixed struct ring, multiple cursors, explicit overflow ⇒ resync) as the derived-layer sync mechanism — strictly better than P1's EditReceipt-only story for keeping compaction tables provably in sync without callbacks.",
+      "From Proposal 2: two-level drift detection — cheap per-island Fingerprint every N ticks, full canonical ExternalKey-sorted export diff only on mismatch; makes the R11 backstop cheap enough to leave on.",
+      "From Proposal 2: per-island AllocationSentinel wrapping the solve call in debug (GC.GetAllocatedBytesForCurrentThread delta == 0), so an allocation regression fires on the first offending tick in ordinary dev play — finer-grained than P1's per-guard-region tripwire.",
+      "From Proposal 2: ClientPartitioned mode where a commit that would merge across Stationeers CableNetwork partition keys fails atomically — the API enforces the game's never-merge invariant instead of trusting the adaptor.",
+      "From Proposal 2: an explicit Tier-0 Meta facade so limit-envelope and probe-weight updates are visibly free of matrix cost (ambient-temperature recompute must never look like it might refactor).",
+      "From Proposal 3: DrainStats/TickStats budget assertions as standing CI tests ('linear AC island in steady operation: Tier2Refactors == 0, Tier3Rebuilds == 0') — turns the load-bearing performance fact of solver.md into an executable contract that catches tier demotions before a profiler does.",
+      "From Proposal 3: CostOf(in Command) — a programmatic 'what would this cost' query, letting Re-Volt's scheduler decide whether an edit fits the remaining tick budget.",
+      "From Proposal 3: SpiceDeck.Emit with deterministic naming, a NodeNames column map for the differ, MatchBackwardEuler options, and an Unrepresentable list — this is the missing oracle-emission piece P1 needs for testing-strategy.md.",
+      "From Proposal 3: invariants as public API (KCL residual + worst node, finiteness, energy audit) so CI asserts, the resync backstop, and the tablet's educational error messages share one code path.",
+      "From Proposal 3: the ReproBundle/flight-recorder concept — but gated to debug/opt-in builds and with rebase moved off the sim thread, so the repro story doesn't buy a periodic steady-state allocation spike in production.",
+      "From Proposal 3: boundary exchanges recorded as tier-1 commands on the receiving island, so a single Faulted island replays offline without simulating its neighbors."
+    ]
+  },
+  {
+    "scores": [
+      {
+        "proposal": "Proposal 1 — Four Verbs (client-ergonomics lens)",
+        "tierLegibility": 9,
+        "zeroAlloc": 9,
+        "islands": 7,
+        "snapshot": 7,
+        "ergonomics": 9,
+        "testability": 6,
+        "total": 47,
+        "notes": "The verb grammar plus EnterSteadyState guard plus TickStats is the strongest R4 story: cost violations fail to compile, trip a debug assert, or show up in counters — three independent nets, and the Building island state is the only correct answer here to the Stationeers background-load handoff. But 'internal ids do not survive rebuilds; StateKeys do' is a landmine: any removal rebuilds the island, so the handle-survival contract for every cached ResistorId in the adaptor is left implicit, and that is precisely the aliasing bug I would spend a week chasing in year two. Testability is where I'd bleed: no replay, no repro artifact, no invariant readbacks — a field bug becomes a hand-reconstructed scenario, not a five-minute test."
+      },
+      {
+        "proposal": "Proposal 2 — generational handles + transactional edits + pollable journal (compaction lens)",
+        "tierLegibility": 8,
+        "zeroAlloc": 9,
+        "islands": 9,
+        "snapshot": 8,
+        "ergonomics": 7,
+        "testability": 7,
+        "total": 48,
+        "notes": "This is the only proposal that makes the highest-risk subsystem — incremental compaction, which compaction.md flatly says WILL have edge-case bugs — provable rather than disciplined: derived tables sync by replaying an atomic commit's journal window, a lagging reader knows it overflowed, and ClientPartitioned commits that would merge vanilla networks fail at commit instead of trusting the adaptor. The handle contract is stated exactly (components survive rebuild, islands don't, stale use throws a name), and DriftReport entries keyed by ExternalKey turn resync mismatches into bug reports with coordinates. Scars it leaves: no Building state for background construction, no per-tick cost counters (I want P1's TickStats), mandatory 128-bit keys tax the tablet, and topology-only journaling means solver-value bugs still lack a replay path."
+      },
+      {
+        "proposal": "Proposal 3 — command log / every bug ships its own repro (testability lens)",
+        "tierLegibility": 8,
+        "zeroAlloc": 8,
+        "islands": 5,
+        "snapshot": 10,
+        "ergonomics": 6,
+        "testability": 10,
+        "total": 47,
+        "notes": "ReproBundle + logged solves + BoundaryExchange-as-recorded-input is the exact machinery testing-strategy.md's 'every failure reproduces from inputs alone' demands, and the bit-for-bit R6 property test with EnvFingerprint honesty about JIT/FMA is the most rigorous snapshot story on the table — a maintainer's dream for turning a player's Faulted island into a CI test. But the island/compaction surface is a sketch: no coupling-device API exists despite breakers being 'coupling devices', no reduction layer, no Building state, and client-callable SetAcSubstepCount contradicts solver.md's settled hysteresis-owned N. The auto-rebase SaveCanonical on ring wrap also allocates mid-steady-state — amortized, but it's an asterisk on the R8 gate that the CI benchmark will eventually flag at 3am."
+      }
+    ],
+    "winner": "Proposal 2 — generational handles + transactional edits + pollable journal (compaction lens)",
+    "steal": [
+      "From Proposal 1: the EnterSteadyState guard region with a debug allocation tripwire (thread-local allocated-bytes delta asserted at Dispose) — turns the R8 contract into a first-tick failure in ordinary dev play, not a benchmark-time discovery.",
+      "From Proposal 1: TickStats/per-solve cost counters (Refactorizations, IslandRebuilds, BytesAllocated) as a standing readback — the SRE owner monitors the solver like a service, and 'Tier2Refactors == 0 in steady state' becomes an assertable SLI.",
+      "From Proposal 1: the Building island status with last-good reads and no-op Step — the clean primitive for the Stationeers background-build one-tick handoff, which P2's Ready/Faulted machine is missing.",
+      "From Proposal 1: epsilon no-op on Adjust so converged G = P/V² adaptor loops fall back to cached-LU cost automatically, with the stats making the convergence visible.",
+      "From Proposal 3: the ReproBundle flight recorder — a preallocated 32-byte command ring including solves and boundary exchanges, cheap enough to leave on in production, so a Faulted island exports a self-contained replay artifact; graft it onto P2's journal as a value-level sibling log.",
+      "From Proposal 3: invariants as public API (InvariantReport with MaxKclResidual + WorstKclNode, EnergyAudit) — one code path shared by CI asserts, the resync backstop, and the tablet's educational 'current doesn't balance at this node' message.",
+      "From Proposal 3: the SaveCanonical vs SaveNormalized split — hole-preserving form for replay compatibility, renumbered form for structural-equality goldens; one format serving both quietly breaks one of them.",
+      "From Proposal 3: SpiceDeck.Emit returning an Unrepresentable component list and a NodeId-to-rawfile-column map — the oracle differ knows its own fidelity and never guesses names, and deterministic deck text doubles as a Verify snapshot golden."
+    ]
+  }
+]
