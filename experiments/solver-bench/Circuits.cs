@@ -283,4 +283,44 @@ public static class Circuits
 
     /// <summary>The Stationeers load-time case: build + first solve at 10k.</summary>
     public static LinearSystem ColdBuildCase() => LadderA(10_000);
+
+    /// <summary>
+    /// Frozen-pivot stress: same topology as LadderB (voltage sources every
+    /// 50 nodes), but resistances drawn log-uniform across the ENTIRE legal
+    /// conductance range (solver.md numerics: 1e-9..1e3 S). Different seeds
+    /// give identical patterns with wildly different values — the shape of
+    /// a switch flip under KLU-style refactorization.
+    /// </summary>
+    public static LinearSystem LadderExtreme(int nodes, int seed, int sourceEvery = 50)
+    {
+        var rng = new Random(seed);
+        double LogUniformOhms() => Math.Pow(10.0, -3.0 + 12.0 * rng.NextDouble());
+
+        var sourceNodes = new List<int>();
+        for (var i = 0; i < nodes; i += sourceEvery)
+            sourceNodes.Add(i);
+
+        var dim = nodes + sourceNodes.Count;
+        var b = new Builder(dim);
+        var rhs = new double[dim];
+
+        for (var i = 0; i < nodes; i++)
+        {
+            b.StampResistor(i, -1, LogUniformOhms());
+            if (i + 1 < nodes)
+                b.StampResistor(i, i + 1, LogUniformOhms());
+        }
+        for (var s = 0; s < sourceNodes.Count; s++)
+            b.StampGroundedVoltageSource(sourceNodes[s], nodes + s, 12.0, rhs);
+
+        var (pattern, values) = b.Build();
+        return new LinearSystem
+        {
+            Name = $"ladderX-{nodes}-s{seed}",
+            Dimension = dim,
+            Pattern = pattern,
+            Values = values,
+            Rhs = rhs,
+        };
+    }
 }

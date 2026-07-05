@@ -5,9 +5,83 @@ using Manatee.SolverBench;
 
 if (args.Length > 0 && args[0] == "verify")
     return Verifier.Run(oracle: Environment.GetEnvironmentVariable("MANATEE_ORACLE") != "0");
+if (args.Length > 0 && args[0] == "stress")
+    return PivotStress.Run();
 
 BenchmarkSwitcher.FromAssembly(typeof(Registry).Assembly).Run(args);
 return 0;
+
+/// <summary>
+/// Frozen-pivot stress: sparse-lu freezes its pivot order at the first
+/// Factorize (KLU-style). Does that order stay numerically sound when
+/// every conductance is redrawn across the full legal range (a maximal
+/// tier-2 swing)? Compares refactorize-with-frozen-pivots against a
+/// fresh re-pivoted factorization of the same values.
+/// </summary>
+internal static class PivotStress
+{
+    public static int Run()
+    {
+        const int rounds = 200;
+        var proto = Circuits.LadderExtreme(500, seed: 0);
+
+        var frozen = new Manatee.SolverBench.Backends.SparseLuBackend();
+        frozen.Analyze(proto.Dimension, proto.Pattern);
+        frozen.Factorize(proto.Values);
+
+        double worstFrozen = 0, worstFresh = 0, worstDisagree = 0;
+        var failures = 0;
+        var xFrozen = new double[proto.Dimension];
+        var xFresh = new double[proto.Dimension];
+
+        for (var round = 1; round <= rounds; round++)
+        {
+            var system = Circuits.LadderExtreme(500, seed: round);
+            if (!system.Pattern.AsSpan().SequenceEqual(proto.Pattern))
+                throw new InvalidOperationException("pattern drifted between seeds — generator bug");
+
+            var scale = Math.Max(1.0, system.Rhs.Max(Math.Abs));
+            double frozenResidual;
+            try
+            {
+                frozen.Factorize(system.Values);
+                frozen.Solve(system.Rhs, xFrozen);
+                frozenResidual = system.ResidualInfNorm(xFrozen) / scale;
+            }
+            catch (InvalidOperationException e)
+            {
+                // A legible refusal (zero pivot) is a *good* outcome vs silent garbage.
+                Console.WriteLine($"  round {round}: frozen refactor refused: {e.Message}");
+                failures++;
+                continue;
+            }
+
+            var fresh = new Manatee.SolverBench.Backends.SparseLuBackend();
+            fresh.Analyze(system.Dimension, system.Pattern);
+            fresh.Factorize(system.Values);
+            fresh.Solve(system.Rhs, xFresh);
+            var freshResidual = system.ResidualInfNorm(xFresh) / scale;
+
+            double disagree = 0;
+            for (var i = 0; i < system.Dimension; i++)
+                disagree = Math.Max(disagree, Math.Abs(xFrozen[i] - xFresh[i]) /
+                    Math.Max(1e-9, Math.Abs(xFresh[i])));
+
+            worstFrozen = Math.Max(worstFrozen, frozenResidual);
+            worstFresh = Math.Max(worstFresh, freshResidual);
+            worstDisagree = Math.Max(worstDisagree, disagree);
+            if (frozenResidual > 1e-6) failures++;
+        }
+
+        Console.WriteLine($"rounds: {rounds}");
+        Console.WriteLine($"worst scaled residual, frozen pivots : {worstFrozen:E2}");
+        Console.WriteLine($"worst scaled residual, fresh pivots  : {worstFresh:E2}");
+        Console.WriteLine($"worst frozen-vs-fresh solution diff  : {worstDisagree:E2}");
+        Console.WriteLine($"failures (residual > 1e-6 or refusal): {failures}");
+        Console.WriteLine(failures == 0 ? "STRESS PASS" : "STRESS FAIL — frozen pivots need a growth monitor");
+        return failures == 0 ? 0 : 1;
+    }
+}
 
 internal static class Verifier
 {

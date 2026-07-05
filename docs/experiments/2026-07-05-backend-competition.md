@@ -88,11 +88,17 @@ ngspice-audited referee to ≤ 1e-13, zero-alloc audit).
 
 - Contestant code is experiment-grade (one afternoon, agent-written);
   numbers are architecture signals, not shipped-code guarantees.
-- `sparse-lu`'s frozen-pivot refactorization (KLU-style) is untested
-  against extreme tier-2 conductance swings (switch = 1e-9 ↔ 1e3 S);
-  solver.md's conductance-range policy bounds this, but the real
-  implementation needs a pivot-growth monitor with refactor-from-
-  scratch fallback.
+- `sparse-lu`'s frozen-pivot refactorization (KLU-style) **was** stress
+  tested after the first draft of this report (`solver-bench stress`):
+  200 rounds of redrawing every conductance log-uniformly across the
+  full legal range (1e-9..1e3 S, the maximal tier-2 swing) on a
+  510-unknown family-B ladder. Worst scaled residual with frozen
+  pivots: 1.7e-9, vs 1.9e-13 with fresh pivoting; zero failures, zero
+  refusals. Four orders of magnitude of accuracy are lost at the
+  extremes but the result stays far inside gameplay tolerance — the
+  approach is sound for solver.md's conductance policy. A pivot-growth
+  monitor with refactor-from-scratch fallback remains cheap hygiene
+  for the production core, but it is not load-bearing.
 - One RNG seed per system; ladder/grid/mesh topologies only; no
   Newton iteration, no companion-model updates — pure linear-solve
   costs.
