@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Manatee.SolverBench</RootNamespace>
+    <!-- Experiment code: keep friction low, this is not shipping quality. -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BenchmarkDotNet" />
+    <PackageReference Include="CSparse" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../core/Manatee.Oracle/Manatee.Oracle.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -11,6 +11,8 @@
     <PackageVersion Include="Verify.Xunit" Version="31.12.5" />
     <!-- Benchmarks -->
     <PackageVersion Include="BenchmarkDotNet" Version="0.15.8" />
+    <!-- Solver backends (LGPL, separate DLL — design.md licensing) -->
+    <PackageVersion Include="CSparse" Version="4.4.0" />
     <!-- Harness UI -->
     <PackageVersion Include="Avalonia" Version="12.0.5" />
     <PackageVersion Include="Avalonia.Desktop" Version="12.0.5" />
