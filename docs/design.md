@@ -418,8 +418,7 @@ Summary; full treatment in [testing-strategy.md](testing-strategy.md).
 
 ## Repository Layout and Licensing
 
-The repository is **manatee** (jj, colocated git; the directory is still
-named `mna-games` — rename pending, best done between sessions). Planned
+The repository is **manatee** (jj, colocated git). Planned
 layout: `core/` (manatee-core: solver + shared reduction layer),
 `vintagestory/` (the Manatee mod, including the tablet), `docs/`, and
 `third_party/` for the reference checkouts (`ElectricalAge/`, `revolt/`,
