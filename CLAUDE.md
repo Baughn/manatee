@@ -24,6 +24,8 @@ hard *because* real electricity is.
 | `docs/testing-strategy.md` | ngspice oracles, lesson corpus as CI goldens, invariants, equivalence tests, toolchain. The math is treated as untrusted input. |
 | `docs/harness.md` | 2D harness / tablet engine: three pure layers (document, interaction SM, display-list view), rendering backends, headless testing model. |
 | `docs/curriculum.md` | Tablet lesson arc (17 lessons, DC → AC power) and authoring rules. |
+| `docs/falstad-format.md` | Falstad/circuitjs1 text-format spec (from source), EA dialect, importer accept/reject contract. |
+| `docs/experiments/` | Dated experiment reports and the API-competition proposals/synthesis — decision inputs, not canon. |
 
 `third_party/` holds reference checkouts and the Stationeers decompilation —
 see `third_party/CLAUDE.md` for what's there and the decompile caveats.
