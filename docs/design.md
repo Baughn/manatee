@@ -142,7 +142,9 @@ Each requirement is justified by the purpose above.
   insulation, and fusing become emergent, teachable physics rather than
   special cases — e.g. a lead segment in a copper run IS a fuse.*
 - **R13. Frictionless placement.** Cable-laying via pathfinding (as in
-  sparky); the physical act of building must not be the hard part.
+  sparky); the physical act of building must not be the hard part. The
+  pathfinder routes conductor *pairs* by default (two-wire idiom — see
+  Grounding model); one gesture lays supply and return.
 - **R14. Mechanical coupling.** Alternators load the mechanical network with
   torque proportional to electrical load; motors do the reverse. Frequency =
   shaft speed × pole pairs. *Justification: VS's mechanical network gives AC
@@ -368,24 +370,55 @@ job via wheel gearing, pole count, and transformers.
 
 ### Grounding model
 
-Settled 2026-07-05. The starter wiring idiom is **ground-return** (SWER —
-single-wire earth return, real rural-grid engineering): one conductor out,
-the earth back. Earth is an ordinary solver node reached through
-**per-electrode contact resistance** (tens of ohms, better when wet), so
-grounding-rod quality is a real, teachable parameter — and "bare
-conductors ground when wet" falls out of the same mechanism. Because
-earth is the return conductor, every island touches the ground reference
-and R12's shock-relative-to-ground is always defined.
+Settled 2026-07-05; **revised same day** after adversarial review C1
+(the SWER-first version failed arithmetic at 12 V: tens-of-ohms
+electrodes starve any real starter load) and a two-wire benchmark
+(docs/experiments/2026-07-05-backend-competition.md, addendum).
 
-Two-wire circuits are not a separate system — running an insulated return
-just works — and a deliberately *floating* system (isolation transformer +
-insulated return) is an advanced build with real safety semantics: one
-wire of a floating system is safe to touch, and the shock rule there is
-touching two points of it. CPU was not the deciding factor (two-wire
-roughly doubles node count — still microseconds at post-compaction sizes);
-the cost of two-wire-everywhere would have been placement friction (R13).
-Stationeers keeps vanilla single-conductor semantics with a local
-reference per network — a per-client choice; the core doesn't care.
+**The default wiring idiom in Vintage Story is two-wire.** The cable
+pathfinder routes conductor *pairs* — one gesture lays supply and
+return, so R13's frictionless-placement mandate absorbs the extra
+conductor entirely. There is no inherent grounding: the solver matrix
+is kept grounded by an implicit high-resistance leak (~1 MΩ) from each
+device negative to earth — benchmarked at machine-epsilon conditioning
+cost, and a 1.5× hot-path / 2.3× refactor multiplier on realistic
+(ladder-shaped, post-compaction) circuits, which the budget absorbs
+without noticing.
+
+**Earth is still an ordinary solver node** reached through
+**per-electrode contact resistance** (tens of ohms, better when wet):
+grounding-rod quality stays a real, teachable parameter, and "bare
+conductors ground when wet" falls out of the same mechanism.
+**Ground-return (SWER) becomes a user-visible choice, not the
+default** — it earns its keep exactly where the real arithmetic works:
+high-voltage distribution (240 V long runs), and milliamp signalling
+(telegraph, doorbell, electric fences — historically accurate SWER
+territory). The curriculum lesson reframes accordingly: not "this is
+how wiring works" but *"copper is expensive — when can you get away
+with one wire?"*, with the electrode-loss arithmetic as its
+predict-then-observe core. The 12 V starter tier survives unchanged; a
+copper return fixes its arithmetic.
+
+Deliberately *floating* systems (isolation transformer + no earth
+reference) are now buildable by default, so the safety pedagogy is
+stated carefully: one wire of a **verified** floating system is safe to
+touch (shock there requires two points). Verification is a taught
+ritual — the multimeter reads wire-to-earth voltage from day one, and
+an isolation-monitor device (a lamp pair to earth; actual historical
+practice) is the advanced build's companion. Rain-wetted bare spans can
+silently re-ground a floating system; the monitor is how you know.
+
+**Stationeers has no wiring choice** — no cable voxels, and vanilla
+devices have a single power terminal, so a SWER-vs-two-wire decision
+cannot exist there. Re-Volt therefore uses implicit ground-return with
+a near-ideal return conductance per network: numerically identical to
+modeling the return conductor, while the fiction describes an ordinary
+two-wire cable bundle. The full double-wire solve is never paid.
+**API consequence:** the wiring model is a per-client choice the core
+must express — netlist construction is explicit about both device
+terminals, and a client either binds negatives to routed return nodes
+(VS) or to its network's reference node (Stationeers). The API design
+(experiments/api-competition/synthesis.md) carries this forward.
 
 ### Elevator control: pure electromechanics
 
@@ -521,9 +554,9 @@ attribution is a per-limit-type, environment-adjusted envelope
 follow-up resolved the remainder: boundary couplings exchange
 amplitude+phase per substep with explicit relaxation (physical transformer
 storage is modeled but not relied on; DC converter two-ports carry a real
-DC-link capacitor — solver.md, Islands); grounding is ground-return/SWER
-as the starter idiom with earth as an ordinary node behind per-electrode
-contact resistance (see Grounding model); and the solver backend is an
+DC-link capacitor — solver.md, Islands); grounding was first settled as
+SWER-the-starter-idiom, then revised the same day to two-wire-default
+with SWER as a user-visible choice (see Grounding model); and the solver backend is an
 interface — in-house zero-alloc dense LU primary, CSparse.NET as interim
 large-island fallback, in-house sparse refactor only if benchmarks demand
 (solver.md, Numerics).

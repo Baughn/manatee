@@ -82,3 +82,15 @@ From Proposal 3 (testing lens):
 3. P1's `Reconfigure` coalescing (split-rebuild deferred to next Solve)
    vs. P2's transactional commit semantics need one reconciled story
    for "what does the netlist look like between Reconfigure and Solve".
+4. **Per-client wiring model** (grounding decision, 2026-07-05):
+   netlist construction is explicit about both device terminals. VS
+   binds device negatives to routed return-conductor nodes (two-wire),
+   plus an implicit ~1 MΩ leak to earth per device negative for matrix
+   grounding; Stationeers binds every negative to its network's
+   reference node (implicit near-ideal ground return — no cable voxels,
+   single-terminal vanilla devices, so no wiring choice exists there).
+   The API must make the "reference node of this island/network" a
+   first-class concept a client can bind terminals to, without the core
+   caring which convention the client chose — and the implicit-leak
+   stamping should be a construction-time policy, not per-device client
+   boilerplate.

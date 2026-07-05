@@ -52,7 +52,11 @@ at game tick rates (documented per lesson).
 13. The transformer (turns ratio; why it only works on AC; why 5 Hz
     transformers are enormous).
 14. Line loss and why we transmit high-voltage (ties to the 12 V cottage
-    problem the player has personally suffered).
+    problem the player has personally suffered). Includes the
+    ground-return coda: "copper is expensive — when can you get away
+    with one wire?" SWER's electrode-loss arithmetic shows it works at
+    240 V distribution and for milliamp signalling, and fails for 12 V
+    loads (design.md Grounding model, revised 2026-07-05).
 15. Impedance: capacitors and inductors on AC (phase, without the word
     "phasor").
 16. Power factor (the sloshing current that heats cables but does no work).
@@ -61,7 +65,9 @@ at game tick rates (documented per lesson).
 
 **IV. Appendices** (unlocked, non-sequential): metric prefixes in readouts
 (EA precedent), reading the multimeter/oscilloscope, the hazard reference
-(what voltage does to you; lockout-tagout).
+(what voltage does to you; lockout-tagout; the verified-floating ritual —
+"one wire of a floating system is safe to touch" holds only after the
+wire-to-earth multimeter check, because wet bare spans re-ground silently).
 
 ## Authoring Rules
 
