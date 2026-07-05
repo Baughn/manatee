@@ -108,6 +108,11 @@ Always-on in debug builds, assertable in any test:
   state bugs.
 - **Coupling conservation**: island-coupling devices never transfer more
   energy than the source island delivered (no free energy at boundaries).
+  Sharpened 2026-07-05: boundary and adaptor energy *ledgers* must stay
+  within tolerance over any window — the property tests drive oscillating
+  loads (square waves near 1/α, tick-rate toggles against adapted
+  generators) and assert net energy conservation over the window, not
+  just per-exchange clamping.
 - **Finiteness**: no NaN/Inf anywhere in a solution vector, ever (solver.md
   failure handling).
 

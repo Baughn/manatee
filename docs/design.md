@@ -178,7 +178,10 @@ Each requirement is justified by the purpose above.
   constant-power elements, linearized across ticks (G = P/V_prev², clamped;
   undervoltage ⇒ brownout dropout). Native conversions replace the adaptor
   per-device, gradually. Vanilla state stays maintained so removing the mod
-  reverts cleanly.
+  reverts cleanly. Each adapted device carries an across-tick **energy
+  ledger** (deliverable this tick = advertised − accumulated debt), so the
+  linearization lag cannot be pumped for free energy by oscillating loads
+  (adversarial review 2026-07-05; see the energy-accounting rule below).
 - **R19. Real voltage tiers.** Voltage is player-facing (device ratings,
   transformer steps), not an internal detail under vanilla watt semantics.
   (Settled with Sukasa, 2026-07-02.)
@@ -265,6 +268,15 @@ Summary here; the full treatment goes in [solver.md](solver.md).
 - **Generator paralleling:** swing-equation-lite — each generator carries a
   phase angle + angular velocity state with spring-damper coupling through
   the network. Synchronization is a gameplay skill.
+- **Energy accounting (design rule, settled 2026-07-05):** energy is
+  conserved by construction everywhere — solver, island boundaries, the
+  Stationeers adaptor — and modeled inefficiency is *explicit*, dumped as
+  heat where the loss physically lives. Accounting surpluses (adaptor
+  lag, boundary relaxation) are debited or converted to device heat,
+  never stored work; per-boundary and per-adapted-device energy ledgers
+  enforce this at runtime, and conservation-under-oscillation is a
+  standing property test. Doubly interesting in Stationeers, where the
+  dumped heat lands in a real thermal simulation.
 
 ## Vintage Story: Game Design
 
@@ -344,6 +356,15 @@ job via wheel gearing, pole count, and transformers.
   The easy fix for flicker, meanwhile, is DC lighting. Resistive lamps
   themselves are frequency-indifferent; frequency matters through flicker,
   transformers, and (later) motors.
+
+  **Flicker accessibility (settled 2026-07-05):** 3–30 Hz rhythmic
+  flashing is the photosensitive-epilepsy trigger band, and 5 Hz lamps
+  sit in it. The client therefore presents a **forced choice on first
+  boot, before any devices exist**: render lamp luminance faithfully, or
+  low-pass it. The simulation is untouched either way — the oscilloscope
+  still shows the true waveform, flicker remains the lesson at default
+  fidelity for those who opt in, and DC lighting remains the in-fiction
+  fix.
 
 ### Grounding model
 

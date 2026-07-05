@@ -103,6 +103,41 @@ ngspice-audited referee to ≤ 1e-13, zero-alloc audit).
   Newton iteration, no companion-model updates — pure linear-solve
   costs.
 
+## Addendum: two-wire wiring cost (same day)
+
+Motivated by the SWER-at-12V finding: if the pathfinder runs two
+conductors (supply + return; no inherent earth; implicit 1 MΩ leak to
+ground at each device negative to keep the matrix grounded), what's the
+CPU multiplier? New generators `Ladder2W`/`Grid2W` (floating-source
+stamp oracle-checked against ngspice to 9e-10) at equal *load* counts —
+two-wire carries 2L+1 unknowns vs L. Production-candidate backends only.
+
+`sparse-lu`, two-wire ÷ one-wire, same load count:
+
+| Topology (loads) | Solve 1W → 2W (ns) | × | Factorize+Solve 1W → 2W (ns) | × |
+| --- | --- | ---: | --- | ---: |
+| ladder-100 | 999 → 1,511 | 1.5 | 2,328 → 5,406 | 2.3 |
+| ladder-500 | 4,986 → 7,663 | 1.5 | 11,583 → 27,046 | 2.3 |
+| ladder-2000 | 19,911 → 30,785 | 1.5 | 47,202 → 109,010 | 2.3 |
+| grid-32×32 (1024) | 9,175 → 35,111 | 3.8 | 221,775 → 1,919,109 | 8.7 |
+
+(csparse and banded-rcm show the same shape, worse constants; banded's
+grid band doubles, quadrupling its band² refactor cost as predicted.)
+
+Reading: for ladder-ish topologies — which is what post-compaction
+circuits look like, and two-wire runs series-collapse exactly like
+one-wire runs — two-wire costs **1.5× on the hot path**. The full
+double-mesh grid with a load bridging every cell is the adversarial
+worst case (the stacked layers behave like a thicker mesh; fill-in
+grows superlinearly) and still lands at 35 µs Solve / 1.9 ms refactor
+at 1024 loads — inside the 5 ms on-thread budget even at 100 AC
+substeps only if islands stay below ~1000 meshy loads, which is already
+far beyond the design target of "few hundred components post-compaction".
+**Conclusion: two-wire wiring is affordable; CPU is not a reason to
+reject it.** Numerics note: the 1 MΩ device-negative leaks caused no
+conditioning trouble (residuals at machine epsilon, oracle agreement
+9e-10).
+
 ## Recommendation
 
 Make the KLU-style in-house sparse LU (ordering + symbolic in Analyze,

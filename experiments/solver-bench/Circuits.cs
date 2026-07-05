@@ -75,6 +75,16 @@ public static class Circuits
             rhs[br] = volts;
         }
 
+        /// <summary>Floating voltage source E from p (+) to q (−), branch unknown at br.</summary>
+        public void StampVoltageSource(int p, int q, int br, double volts, double[] rhs)
+        {
+            Add(p, br, 1.0);
+            Add(br, p, 1.0);
+            Add(q, br, -1.0);
+            Add(br, q, -1.0);
+            rhs[br] = volts;
+        }
+
         public (MatrixEntry[] Pattern, double[] Values) Build()
         {
             var keys = _entries.Keys.OrderBy(k => k.Row).ThenBy(k => k.Col).ToArray();
@@ -261,6 +271,115 @@ public static class Circuits
         };
     }
 
+    /// <summary>
+    /// Two-wire ladder (the SWER-alternative wiring model, 2026-07-05):
+    /// every load has a supply and a return conductor; no inherent earth
+    /// return. Node layout interleaves supply (2i) and return (2i+1).
+    /// A floating source drives the pair; each device negative leaks to
+    /// earth through a high resistance purely to keep the matrix grounded.
+    /// `loads` loads → 2·loads + 1 unknowns.
+    /// </summary>
+    public static LinearSystem Ladder2W(int loads, int seed = 7)
+    {
+        var rng = new Random(seed);
+        var dim = 2 * loads + 1;
+        var b = new Builder(dim);
+        var rhs = new double[dim];
+
+        var spice = new StringBuilder("V1 s1 t1 DC 12\n");
+        var variables = new List<string>();
+        for (var i = 0; i < loads; i++)
+        {
+            variables.Add($"v(s{i + 1})");
+            variables.Add($"v(t{i + 1})");
+        }
+
+        for (var i = 0; i < loads; i++)
+        {
+            int supply = 2 * i, ret = 2 * i + 1;
+
+            var load = 50.0 + 200.0 * rng.NextDouble();
+            b.StampResistor(supply, ret, load);
+            spice.Append(CultureInfo.InvariantCulture, $"RL{i + 1} s{i + 1} t{i + 1} {Ohms(load)}\n");
+
+            // Implicit high-resistance ground at the device negative.
+            b.StampResistor(ret, -1, 1e6);
+            spice.Append(CultureInfo.InvariantCulture, $"RE{i + 1} t{i + 1} 0 1e6\n");
+
+            if (i + 1 < loads)
+            {
+                var supplySeries = 0.5 + 5.0 * rng.NextDouble();
+                var returnSeries = 0.5 + 5.0 * rng.NextDouble();
+                b.StampResistor(supply, supply + 2, supplySeries);
+                b.StampResistor(ret, ret + 2, returnSeries);
+                spice.Append(CultureInfo.InvariantCulture, $"RS{i + 1} s{i + 1} s{i + 2} {Ohms(supplySeries)}\n");
+                spice.Append(CultureInfo.InvariantCulture, $"RT{i + 1} t{i + 1} t{i + 2} {Ohms(returnSeries)}\n");
+            }
+        }
+
+        b.StampVoltageSource(0, 1, 2 * loads, 12.0, rhs);
+        variables.Add("i(v1)");
+
+        var (pattern, values) = b.Build();
+        return new LinearSystem
+        {
+            Name = $"ladder2W-{loads}",
+            Dimension = dim,
+            Pattern = pattern,
+            Values = values,
+            Rhs = rhs,
+            SpiceNetlist = spice.ToString(),
+            SpiceVariables = variables.ToArray(),
+        };
+    }
+
+    /// <summary>
+    /// Two-wire grid: supply and return meshes stacked, a load bridging the
+    /// layers at every cell, floating source at one corner, high-resistance
+    /// earth leak at every device negative. side² loads → 2·side² + 1 unknowns.
+    /// </summary>
+    public static LinearSystem Grid2W(int side, int seed = 8)
+    {
+        var cells = side * side;
+        var dim = 2 * cells + 1;
+        var rng = new Random(seed);
+        var b = new Builder(dim);
+        var rhs = new double[dim];
+
+        int Supply(int cell) => 2 * cell;
+        int Return(int cell) => 2 * cell + 1;
+
+        for (var y = 0; y < side; y++)
+            for (var x = 0; x < side; x++)
+            {
+                var cell = y * side + x;
+                b.StampResistor(Supply(cell), Return(cell), 50.0 + 200.0 * rng.NextDouble());
+                b.StampResistor(Return(cell), -1, 1e6);
+                if (x + 1 < side)
+                {
+                    b.StampResistor(Supply(cell), Supply(cell + 1), 1.0 + 10.0 * rng.NextDouble());
+                    b.StampResistor(Return(cell), Return(cell + 1), 1.0 + 10.0 * rng.NextDouble());
+                }
+                if (y + 1 < side)
+                {
+                    b.StampResistor(Supply(cell), Supply(cell + side), 1.0 + 10.0 * rng.NextDouble());
+                    b.StampResistor(Return(cell), Return(cell + side), 1.0 + 10.0 * rng.NextDouble());
+                }
+            }
+
+        b.StampVoltageSource(Supply(0), Return(0), 2 * cells, 12.0, rhs);
+
+        var (pattern, values) = b.Build();
+        return new LinearSystem
+        {
+            Name = $"grid2W-{side}x{side}",
+            Dimension = dim,
+            Pattern = pattern,
+            Values = values,
+            Rhs = rhs,
+        };
+    }
+
     /// <summary>Small, oracle-checked systems: correctness gate for every backend.</summary>
     public static IEnumerable<LinearSystem> VerificationSet()
     {
@@ -269,6 +388,8 @@ public static class Circuits
         yield return GridA(16);
         yield return LadderB(100, sourceEvery: 25);
         yield return RandomMeshA(500, 1000);
+        yield return Ladder2W(50);   // oracle-checks the floating-source stamp
+        yield return Grid2W(8);
     }
 
     /// <summary>Benchmark matrix: the sizes design.md cares about.</summary>

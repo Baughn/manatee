@@ -190,6 +190,17 @@ unit of parallelism. The islands layer:
   exactly this smoothing. Stability is enforced, not assumed: the
   adaptor-stability property test extends to boundary couplings
   (testing-strategy.md).
+  **Scheduling and conservation** (settled 2026-07-05, resolving a
+  cadence contradiction found in adversarial review): islands joined by
+  boundary couplings are scheduled as **one work unit** and substep in
+  lockstep — per-substep exchange and per-island determinism both hold
+  because the exchange happens inside the unit, never across free-running
+  threads. Each boundary carries a running **energy ledger**
+  (∫P_out − ∫P_in − modeled losses); any accounting surplus is dumped
+  into the coupling device's heat output rather than ever becoming
+  stored work. This instantiates the project-wide rule (design.md,
+  Simulation Model): energy is conserved by construction, and modeled
+  inefficiency is explicit heat.
 - **Relay-vs-breaker duality** (settled 2026-07-05): same physics,
   different API citizenship, chosen per device type. A *relay contact* is
   a netlist switch — tier 2, stays inside its island's matrix; the hot
@@ -282,5 +293,8 @@ The acceptance bar is Re-Volt's worker thread (the stricter environment):
 - All solver state is confined to its island; islands are independently
   lockable; the API is single-writer-per-island, enforced by debug asserts
   rather than locks (clients own scheduling).
-- Determinism per island regardless of thread interleaving (islands don't
-  share state; coupling values exchange at tick boundaries only).
+- Determinism per island regardless of thread interleaving. Islands
+  don't share state; islands joined by boundary couplings form one
+  scheduling unit and substep in lockstep (see Islands), so their
+  per-substep exchanges are deterministic too. Only fully independent
+  islands run on separate workers.

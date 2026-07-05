@@ -73,6 +73,80 @@ public class SolveBenchmarks
 }
 
 /// <summary>
+/// One-wire vs two-wire cost at equal LOAD counts (SWER-alternative
+/// wiring, 2026-07-05): Ladder/Grid A carry one node per load; the 2W
+/// variants carry supply+return nodes per load (2L+1 unknowns). Only the
+/// production-candidate sparse backends compete — the question is the
+/// two-wire multiplier, not the backend ranking.
+/// </summary>
+[InProcess]
+[WarmupCount(3)]
+[IterationCount(5)]
+[MemoryDiagnoser]
+public class TwoWireBenchmarks
+{
+    private static readonly string[] Contestants = ["sparse-lu", "csparse", "banded-rcm"];
+
+    public static IEnumerable<BenchCase> Cases()
+    {
+        LinearSystem[] systems =
+        [
+            Circuits.LadderA(100), Circuits.Ladder2W(100),
+            Circuits.LadderA(500), Circuits.Ladder2W(500),
+            Circuits.GridA(32), Circuits.Grid2W(32),
+            Circuits.LadderA(2000), Circuits.Ladder2W(2000),
+        ];
+        foreach (var system in systems)
+            foreach (var factory in Registry.Factories)
+            {
+                var probe = factory();
+                if (!Contestants.Contains(probe.Name))
+                    continue;
+                try
+                {
+                    probe.Analyze(system.Dimension, system.Pattern);
+                }
+                catch (NotSupportedException)
+                {
+                    continue;
+                }
+                yield return new BenchCase
+                {
+                    Factory = factory,
+                    System = system,
+                    Label = $"{probe.Name}|{system.Name}",
+                };
+            }
+    }
+
+    [ParamsSource(nameof(Cases))]
+    public BenchCase Case = null!;
+
+    private ISolverBackend _backend = null!;
+    private double[] _solution = null!;
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        _backend = Case.Factory();
+        _backend.Analyze(Case.System.Dimension, Case.System.Pattern);
+        _backend.Factorize(Case.System.Values);
+        _solution = new double[Case.System.Dimension];
+        _backend.Solve(Case.System.Rhs, _solution);
+    }
+
+    [Benchmark]
+    public void Solve() => _backend.Solve(Case.System.Rhs, _solution);
+
+    [Benchmark]
+    public void FactorizeSolve()
+    {
+        _backend.Factorize(Case.System.Values);
+        _backend.Solve(Case.System.Rhs, _solution);
+    }
+}
+
+/// <summary>
 /// The Stationeers load-time shape: cold Analyze+Factorize+Solve at 10k
 /// (pre-compaction worst case; post-compaction this island is ~100 nodes).
 /// </summary>
