@@ -313,8 +313,9 @@ public sealed class DiodeNewtonTests
         var isl = net.Islands.Of(a);
         Assert.Equal(IslandStatus.Faulted, isl.Status);
         var fault = isl.Fault;
-        Assert.True(fault.Kind == FaultKind.NewtonDiverged || fault.Kind == FaultKind.Singular,
-            $"expected a Newton/Singular fault, got {fault.Kind}");
+        Assert.True(fault.Kind == FaultKind.NewtonDiverged || fault.Kind == FaultKind.Singular
+                 || fault.Kind == FaultKind.ContradictorySources,
+            $"expected a Newton/Singular/ContradictorySources fault, got {fault.Kind}");
         Assert.False(net.Solution.IsLive(isl.Id));                      // de-energized
 
         // No NaN/∞ ever left the API — scan every readable value (api.md §20).

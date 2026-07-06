@@ -502,6 +502,12 @@ public sealed partial class Netlist
                 ? va - vb
                 : (substepDt / _cValue[c]) * (va - vb) + _cStateVar[c];
         }
+
+        AccumulateIslandEnergy(rt.IslandSlot, substepDt);
+        SampleTaps(rt.IslandSlot);
+        // Per-substep limit scan (see StepTransient): a subcycled boundary-unit member
+        // integrates i²t and catches instantaneous peaks over the cycle, not the tick edge.
+        if (!operatingPoint) EvaluateIslandLimits(rt.IslandSlot, substepDt, _evalTickIndex);
         return SolveStatus.Ok;
     }
 

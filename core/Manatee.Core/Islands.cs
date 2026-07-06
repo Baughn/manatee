@@ -53,11 +53,44 @@ public readonly record struct EnergyAudit(
 /// reports a single DC step.</summary>
 public readonly record struct SubstepPlan(int Substeps, double SubstepDt, double HysteresisBand);
 
-/// <summary>Restore coverage report (api.md §14). Snapshot/restore is phase 6;
-/// declared here for the island surface.</summary>
-public readonly record struct RestoreResult(int Matched, int Untouched, int OrphansInBlob)
+/// <summary>Restore coverage report (api.md §14). Restore is ADDITIVE by
+/// <see cref="StateKey"/>: it overwrites exactly the units the blob names and
+/// leaves every other unit untouched, so both drift directions work (merge:
+/// offer each blob in turn; split: offer the same blob to every resulting
+/// island). Coverage is checked IN AGGREGATE — <c>sum(Matched)</c> across all
+/// blobs offered, against <see cref="IslandHandle.StateUnitCount"/> — never per
+/// call.</summary>
+public readonly struct RestoreResult
 {
+    private readonly Netlist? _net;
+    private readonly long _token;
+
+    internal RestoreResult(Netlist net, long token, int matched, int untouched, int orphansInBlob)
+    {
+        _net = net; _token = token;
+        Matched = matched; Untouched = untouched; OrphansInBlob = orphansInBlob;
+    }
+
+    /// <summary>State units this blob restored (matched a live unit in the island).</summary>
+    public int Matched { get; }
+
+    /// <summary>Live units in the island this blob carried no entry for — left
+    /// as-is, never reset.</summary>
+    public int Untouched { get; }
+
+    /// <summary>Blob entries with no live unit here (world edited between save and
+    /// load; expected in the split pattern, not an error).</summary>
+    public int OrphansInBlob { get; }
+
+    /// <summary>True iff every blob entry found a home in this island.</summary>
     public bool Ok => OrphansInBlob == 0;
+
+    /// <summary>0B; copies the unmatched blob entries' <see cref="StateKey"/>s
+    /// into <paramref name="into"/> (up to its length), returning the count
+    /// written. Valid only until the next <see cref="IslandHandle.Restore"/> on
+    /// this netlist (the scratch is single-slot; a later Restore returns 0 here).</summary>
+    public int DrainOrphans(Span<StateKey> into)
+        => _net is null ? 0 : _net.DrainOrphans(_token, into);
 }
 
 /// <summary>
@@ -149,27 +182,42 @@ public readonly struct IslandHandle
     /// <summary>0B; drains this island's post-solve limit events.</summary>
     public int DrainLimitEvents(Span<LimitEvent> into) => _net.DrainLimitEvents(_slot, _gen, into);
 
-    // ── Snapshot/restore — phase 6 ──
+    /// <summary>0B; drains post-solve limit events and reports how many the fixed-cap
+    /// ring dropped since the last full drain (api.md §12 — overflow counted, R9
+    /// degrades legibly). <paramref name="dropped"/> &gt; 0 ⇒ events were lost and the
+    /// count is cleared once the ring is emptied (call again until 0).</summary>
+    public int DrainLimitEvents(Span<LimitEvent> into, out long dropped)
+        => _net.DrainLimitEvents(_slot, _gen, into, out dropped);
 
-    /// <summary>Stable between topology-changing ops (api.md §11, §14). Phase 6.</summary>
-    public int SnapshotSize => throw NotYet();
+    // ── Snapshot/restore (api.md §14) ──
 
-    /// <summary>Live state units in this island — the restore-coverage
-    /// denominator (api.md §14). Phase 6.</summary>
-    public int StateUnitCount => throw NotYet();
+    /// <summary>Serialized snapshot size in bytes — stable between
+    /// topology-changing ops (re-read after any <see cref="IslandChange"/>).</summary>
+    public int SnapshotSize => _net.SnapshotSize(_slot, _gen);
 
-    public void Snapshot(System.Buffers.IBufferWriter<byte> into) => throw NotYet();
+    /// <summary>Live state units in this island — the aggregate restore-coverage
+    /// denominator (api.md §14): <c>sum(Matched)</c> vs this, after ALL blobs are
+    /// offered, is how many units truly cold-started.</summary>
+    public int StateUnitCount => _net.StateUnitCount(_slot, _gen);
 
-    public RestoreResult Restore(ReadOnlySpan<byte> b) => throw NotYet();
+    /// <summary>Versioned binary snapshot of this island's dynamic state (0B
+    /// core-side; the destination buffer is caller-owned).</summary>
+    public void Snapshot(System.Buffers.IBufferWriter<byte> into) => _net.Snapshot(_slot, _gen, into);
+
+    /// <summary>Restore by <see cref="StateKey"/> — additive; misses cold-start
+    /// and are reported (<see cref="RestoreResult.OrphansInBlob"/>), never thrown.</summary>
+    public RestoreResult Restore(ReadOnlySpan<byte> b) => _net.Restore(_slot, _gen, b);
 
     /// <summary>0B; invariants as API — one path for CI, resync, and the tablet's
-    /// educational messages (api.md §11). Kcl/Finiteness this stage; the residual
-    /// values require a solved vector (stage 2), so they report zero/true here.</summary>
+    /// educational messages (api.md §11): KCL residual (+ worst node), finiteness,
+    /// and the energy residual (source − dissipated − Δstored − boundary − heat).</summary>
     public InvariantReport CheckInvariants(InvariantChecks which)
         => _net.CheckInvariants(_slot, _gen, which);
 
-    /// <summary>Running energy ledger. Zeroed until the solve pipeline lands.</summary>
-    public EnergyAudit Energy => default;
+    /// <summary>Running source/dissipated/Δstored/boundary/heat energy ledger
+    /// (api.md §11), integrated per substep on the hot path into per-island
+    /// doubles (0B); the stored/boundary/heat terms are reconstructed on read.</summary>
+    public EnergyAudit Energy => _net.EnergyAuditOf(_slot, _gen);
 
     /// <summary>Boundary-coupler exchange instrumentation (api.md §7): last-substep
     /// amplitudes/phases and signed A→B power. For a Closed galvanic breaker,
@@ -187,7 +235,4 @@ public readonly struct IslandHandle
     /// construction — it audits the readback arithmetic, not that the physical exchange
     /// conserved (that bound is the OutJ clamp).</summary>
     public EnergyLedger Ledger(CouplerId c) => _net.LedgerOf(c);
-
-    private static NotSupportedException NotYet()
-        => new("Snapshot/restore is phase 6 (api.md §14); not implemented in the document stage.");
 }

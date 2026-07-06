@@ -734,6 +734,9 @@ public readonly struct IslandHandle
     public int DescribeFault(Span<ComponentRef> comps, Span<NodeId> nodes);   // 0B; returns counts packed
 
     public int DrainLimitEvents(Span<LimitEvent> into);   // 0B; post-solve; fixed ring, overflow counted
+    public int DrainLimitEvents(Span<LimitEvent> into, out long dropped);   // 0B; `dropped` = events the ring
+                                            // shed since the last full drain (R9 degrades legibly, §12);
+                                            // cleared once the client catches up (ring emptied)
 
     // Snapshot/restore (§14)
     public int SnapshotSize { get; }        // stable between TOPOLOGY-CHANGING ops (Edit commit, galvanic
@@ -786,10 +789,23 @@ public enum LimitKind : byte { OverCurrent, OverVoltage, OverPower, ThermalI2t }
 ```
 
 Drained per island into a caller span; fixed-cap ring, overflow counted, not
-grown (a melting base needn't emit every event — R9 degrades legibly). **The
+grown (a melting base needn't emit every event — R9 degrades legibly). The
+overflow count is **surfaced** through the `out long dropped` drain overload
+(and cleared once the caller has drained the ring empty), so a client that
+skipped a drain learns events were lost rather than degrading silently. **The
 solver never mutates the circuit on a limit** (R7); popping the fuse is the
 client's `Adjust`/`Reconfigure` on the following phase or tick. The i²t
 thermal accumulator makes fuses and slow cable overload share one mechanism.
+Limits are evaluated **per substep** on a subcycled-AC island (the i²t integral
+is a true ∫I²dt over the cycle and the instantaneous checks see the waveform
+peak, not the tick boundary — a tick-boundary-only scan is phase-blind and a
+fuse whose boundary lands on a sine zero-crossing would never heat); a static
+island with no substeps is still evaluated once per tick. **Instantaneous
+event classes coalesce to at most one event per (component, kind) per tick,
+carrying the worst observed substep value** (ruled 2026-07-06: per-substep
+emission floods the ring on any sustained AC overload, drowning the signal
+R9 wants legible; the integral classes were already edge-latched). The
+evaluation is per-substep either way — only the *emission* coalesces.
 
 ## 13. Probes and the oscilloscope tap
 
@@ -820,9 +836,21 @@ tap object and must live in setup, never in the tick loop (§22.b).
 
 ## 14. Snapshot, restore, serialization laws
 
-Snapshot payload: capacitor voltages, inductor currents, device `Tick` state,
-source phase — keyed by `StateKey`, versioned binary (JSON debug form lives
-in `Manatee.Core.Diagnostics`, zero-cost in release).
+Per-island **snapshot** payload: capacitor voltages, inductor currents, device
+`Tick` state, source phase — keyed by `StateKey`, versioned binary (JSON debug
+form lives in `Manatee.Core.Diagnostics`, zero-cost in release). It does **not**
+carry the i²t thermal accumulators (fuses/cables are unkeyed resistors, outside
+the `StateKey` stream) nor boundary-coupler runtime (unit-owned, not island-
+owned): a per-island snapshot/restore resets those. The whole-netlist
+**`SaveCanonical`** memento (v2) is slot-preserving and DOES carry them — the
+per-component i²t melting integral + trip latch, the global ambient i²t
+threshold scale, and each coupler's persistent `CouplerRuntime` scalars
+(DC-link cap voltage, debt-droop integrators, relaxation smoothing, energy
+ledger) — so a save/load or command-log replay resumes a partway-melted fuse
+and a settled converter/transformer without a cold-start transient. Law 4
+below is scoped to circuits whose evolving state is `StateKey`-keyed; boundary
+couplers and i²t are covered by `SaveCanonical`, not by the per-island snapshot
+(see the open item in §22).
 
 ```csharp
 public readonly struct RestoreResult    // plain struct; orphans drained, not stored as spans

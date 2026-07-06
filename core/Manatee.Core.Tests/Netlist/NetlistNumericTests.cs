@@ -180,13 +180,15 @@ public sealed class NetlistNumericTests
     [Fact]
     public void Contradictory_sources_fault_then_recover_on_removal()
     {
-        // Two ideal sources A→GND disagree (10 V vs 5 V): rank-deficient ⇒ Singular.
+        // Two ideal sources A→GND disagree (10 V vs 5 V): parallel ideal V-sources on the
+        // same node pair ⇒ the singularity is diagnosed as ContradictorySources, naming BOTH
+        // participating sources (api.md §12/§20; solver.md Failure Handling).
         var net = Net(WiringPolicy.ExplicitOnly());
-        NodeId a, g; VSourceId s2;
+        NodeId a, g; VSourceId s1, s2;
         using (var e = net.Edit())
         {
             a = e.AddNode(K(1)); g = e.AddReferenceNode(K(2));
-            e.AddVoltageSource(a, g, 10.0, K(20));
+            s1 = e.AddVoltageSource(a, g, 10.0, K(20));
             s2 = e.AddVoltageSource(a, g, 5.0, K(21));
         }
         net.SolveOperatingPoint();
@@ -195,10 +197,14 @@ public sealed class NetlistNumericTests
         var isl = net.Islands.Of(a);
         Assert.Equal(IslandStatus.Faulted, isl.Status);
         Assert.False(net.Solution.IsLive(islId));
-        Assert.Equal(FaultKind.Singular, isl.Fault.Kind);
+        Assert.Equal(FaultKind.ContradictorySources, isl.Fault.Kind);
         Span<ComponentRef> comps = stackalloc ComponentRef[4];
         Span<NodeId> nodes = stackalloc NodeId[4];
-        Assert.True(isl.DescribeFault(comps, nodes) >= 0);   // localizes to a node/component
+        var packed = isl.DescribeFault(comps, nodes);
+        Assert.Equal(2, packed);   // both fighting sources are named
+        Assert.True((comps[0] == s1.AsRef() && comps[1] == s2.AsRef())
+                 || (comps[0] == s2.AsRef() && comps[1] == s1.AsRef()),
+            "ContradictorySources must name both participating voltage sources");
 
         // Journal recorded the fault.
         var cur = net.Journal.OpenCursorAt(0);

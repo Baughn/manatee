@@ -30,14 +30,11 @@ public readonly struct Solution
     public double Power<TId>(TId c) where TId : struct, IComponentId
         => _net.ReadPower(c.AsRef());
 
-    /// <summary>0B; probe readback (interpolated inside compacted runs).
-    /// Phase 4/6 — the solve/interpolation pipeline is not in the document
-    /// stage.</summary>
+    /// <summary>0B; probe readback (interpolated inside compacted runs):
+    /// V = Va + t·(Vb − Va) for an interpolated probe, or a single node's
+    /// potential for a node probe (api.md §13).</summary>
     [CostTier(1)]
-    public double Read(ProbeId p)
-        => throw new NotSupportedException(
-            "Solution.Read(ProbeId) requires the solve/interpolation pipeline (phase 4/6); " +
-            "not implemented in the document stage.");
+    public double Read(ProbeId p) => _net.ReadProbe(p);
 
     /// <summary>false ⇒ last-good (Building/Dirty) or de-energized (Faulted).</summary>
     public bool IsLive(IslandId i) => _net.IslandIsLive(i);

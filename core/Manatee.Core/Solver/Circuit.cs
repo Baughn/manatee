@@ -510,7 +510,13 @@ internal sealed class Circuit
     /// <summary>Test/diagnostic: worst |(A·x − b)| over the NODE rows of the
     /// published solution — the Kirchhoff current-law residual, gmin shunt
     /// included as a real branch. ~machine precision on a solved island.</summary>
-    internal double MaxNodeKclResidual()
+    internal double MaxNodeKclResidual() => MaxNodeKclResidual(out _);
+
+    /// <summary>Test/diagnostic: the worst KCL residual and, via
+    /// <paramref name="worstRow"/>, the NODE ROW carrying it (−1 if no node rows) —
+    /// so the netlist layer can name "which node leaks current" (api.md §11
+    /// InvariantReport.WorstKclNode). Map the row back with <see cref="NodeForRow"/>.</summary>
+    internal double MaxNodeKclResidual(out int worstRow)
     {
         AssembleValues();     // reflect current values; cheap, zero-alloc
         AssembleRhs();
@@ -519,9 +525,12 @@ internal sealed class Circuit
         ax.Clear();
         for (var k = 0; k < _pattern.Length; k++)
             ax[_pattern[k].Row] += _patternValues[k] * x[_pattern[k].Column];
-        double worst = 0;
+        double worst = 0; worstRow = -1;
         for (var r = 0; r < _nodeRowCount; r++)
-            worst = Math.Max(worst, Math.Abs(ax[r] - _rhs[r]));
+        {
+            var res = Math.Abs(ax[r] - _rhs[r]);
+            if (res > worst || worstRow < 0) { worst = res; worstRow = r; }
+        }
         return worst;
     }
 

@@ -100,6 +100,29 @@ public readonly struct EfficiencyCurve
     /// <summary>Number of breakpoints (1 ⇒ flat).</summary>
     public int Count => _count;
 
+    /// <summary>Serialization seam (api.md §14): write the breakpoints as
+    /// (loadFraction, efficiency) pairs into <paramref name="dst"/> (length ≥ 8);
+    /// returns the breakpoint count. Round-trips through <see cref="FromPoints"/>.</summary>
+    internal int Serialize(Span<double> dst)
+    {
+        Span<double> ls = stackalloc double[4] { _l0, _l1, _l2, _l3 };
+        Span<double> es = stackalloc double[4] { _e0, _e1, _e2, _e3 };
+        for (var i = 0; i < _count; i++) { dst[i * 2] = ls[i]; dst[i * 2 + 1] = es[i]; }
+        return _count;
+    }
+
+    /// <summary>Serialization seam (api.md §14): rebuild from 1..4 breakpoints
+    /// (no ascending-order validation — the bytes came from a valid curve).</summary>
+    internal static EfficiencyCurve FromPoints(ReadOnlySpan<(double loadFraction, double efficiency)> pts)
+    {
+        var count = pts.Length;
+        (double l, double e) p0 = count > 0 ? pts[0] : default;
+        (double l, double e) p1 = count > 1 ? pts[1] : default;
+        (double l, double e) p2 = count > 2 ? pts[2] : default;
+        (double l, double e) p3 = count > 3 ? pts[3] : default;
+        return new EfficiencyCurve(count < 1 ? 1 : count, p0.l, p0.e, p1.l, p1.e, p2.l, p2.e, p3.l, p3.e);
+    }
+
     /// <summary>Linear-interpolated efficiency at a load fraction, clamped flat past
     /// the first/last breakpoint. Allocation-free; two compares + one lerp.</summary>
     public double EfficiencyAt(double loadFraction)

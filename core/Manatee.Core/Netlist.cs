@@ -351,12 +351,12 @@ public sealed partial class Netlist
     /// the structural rebuild (generation reissue, island lifecycle) then a
     /// forced numeric solve of every live island — the energize / lesson-start
     /// path.</summary>
-    public void SolveOperatingPoint() => RunSolve(operatingPoint: true, dt: _profileDt);
+    public void SolveOperatingPoint() => RunSolve(operatingPoint: true, dt: _profileDt, tickIndex: 0);
 
     /// <summary>One game tick: rebuilds/refactors/solves the dirty scheduling
     /// units serially (small clients), publishing each island's solution. Storage
     /// islands integrate one Backward-Euler step (AC islands subcycle N substeps).</summary>
-    public void Solve(in TickClock clock) => RunSolve(operatingPoint: false, dt: clock.Dt);
+    public void Solve(in TickClock clock) => RunSolve(operatingPoint: false, dt: clock.Dt, tickIndex: clock.TickIndex);
 
     // ====================================================== identity resolution
 
@@ -431,21 +431,25 @@ public sealed partial class Netlist
 
     // ============================================ serialization / drift (phase)
 
-    /// <summary>Drift backstop level 1 (api.md §14). Phase 6/7.</summary>
+    /// <summary>Drift backstop level 1 (api.md §14): a cheap structural hash of
+    /// one island, stable within a process run (not across versions).</summary>
     public ulong Fingerprint(IslandId island, FingerprintScope scope)
-        => throw Deferred("Fingerprint", "6");
+        => FingerprintIsland(island.Slot, island.Gen, scope);
 
-    /// <summary>Slot-preserving whole-netlist save (api.md §14). Phase 6.</summary>
-    public void SaveCanonical(System.Buffers.IBufferWriter<byte> dst)
-        => throw Deferred("SaveCanonical", "6");
+    /// <summary>Slot-preserving whole-netlist save (api.md §14 law 1).</summary>
+    public void SaveCanonical(System.Buffers.IBufferWriter<byte> dst) => WriteCanonical(dst);
 
-    /// <summary>Key-sorted minimal save (api.md §14). Phase 6.</summary>
-    public void SaveNormalized(System.Buffers.IBufferWriter<byte> dst)
-        => throw Deferred("SaveNormalized", "6");
+    /// <summary>Key-sorted minimal save (api.md §14 laws 2-3).</summary>
+    public void SaveNormalized(System.Buffers.IBufferWriter<byte> dst) => WriteNormalized(dst);
 
-    /// <summary>Load a slot-preserving save (api.md §14). Phase 6.</summary>
+    /// <summary>Load a slot-preserving save (api.md §14). Options are supplied by
+    /// the caller — netId, journal, and numeric runtime are re-minted.</summary>
     public static Netlist FromCanonical(ReadOnlySpan<byte> src, in NetlistOptions opts)
-        => throw Deferred("FromCanonical", "6");
+    {
+        var net = new Netlist(opts);
+        net.LoadCanonical(src);
+        return net;
+    }
 
     // ============================================================ legibility
 
@@ -482,7 +486,4 @@ public sealed partial class Netlist
     /// <summary>A tier-≤2 capability object for device Tick (api.md §18). Legal
     /// at any time (capability wrapper; single-writer-per-island governs writes).</summary>
     public DeviceTickContext TickContext(double dt) => new(this, dt);
-
-    private static NotSupportedException Deferred(string member, string phase)
-        => new($"{member} is phase {phase}; not implemented in the document stage.");
 }

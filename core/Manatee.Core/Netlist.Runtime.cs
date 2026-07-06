@@ -110,6 +110,9 @@ public sealed partial class Netlist
     private IslandRuntime?[] _iRuntime = new IslandRuntime?[4];
     private bool[] _iRuntimeStale = new bool[4];   // membership changed ⇒ needs a fresh Circuit at Solve
     private FaultDiagnostic[] _iFault = new FaultDiagnostic[4];
+    // Second participating component for a ContradictorySources fault (the first is
+    // FaultDiagnostic.Worst); DescribeFault emits both (api.md §11, §20).
+    private ComponentRef[] _iFaultSecond = new ComponentRef[4];
     private bool[] _iStepping = new bool[4];        // debug single-writer-per-island tripwire
 
     // ── Per-island AC subcycle plan (indexed by island slot) ──
@@ -134,6 +137,10 @@ public sealed partial class Netlist
     private bool _tickStatsSealed;
     private int _stepInFlight;                    // §9 phase assert: no LastTickStats read mid-Step
 
+    // The tick index the CURRENT solve is running at — threaded into the post-solve
+    // limit evaluation (LimitEvent.TickIndex, api.md §12).
+    private long _evalTickIndex;
+
     // Build scratch (shape-time only).
     private readonly List<int> _buildNodes = new();
     private readonly List<int> _numericScratch = new();
@@ -148,6 +155,7 @@ public sealed partial class Netlist
     private readonly List<CompanionStamp> _buildDiodeStamps = new();
     private readonly List<int> _buildDiodeLocalA = new();
     private readonly List<int> _buildDiodeLocalC = new();
+    private readonly List<int> _buildMemberComps = new();   // ALL island member component slots
 
     // Current build mode, threaded into StampComponent (shape-time only, single-writer).
     private bool _buildCompanions;
@@ -198,6 +206,13 @@ public sealed partial class Netlist
         public double[] DiodeGeq = Array.Empty<double>();
         public double[] DiodeIeq = Array.Empty<double>();
         public int DiodeCount;
+
+        // ALL component slots whose A-terminal node belongs to this island (built once
+        // per rebuild). The per-substep energy audit and the limit scan iterate THIS
+        // instead of the whole component arena, so an island's per-tick cost scales with
+        // ITS size, not the whole netlist's (island-independence — the finder's concern).
+        public int[] MemberComps = Array.Empty<int>();
+        public int MemberCount;
 
         // Last-good published vector, captured before a Newton solve point so a
         // diverged solve can hold it (solver.md Failure Handling). Sized to the
@@ -303,9 +318,10 @@ public sealed partial class Netlist
     /// — one rebuild per island per tick, rebuild supersedes merge), then the
     /// numeric pass (build/refactor/solve/publish) over dirty units in the
     /// rebuild-stable <c>Islands.Ids</c> order (§9).</summary>
-    private void RunSolve(bool operatingPoint, double dt)
+    private void RunSolve(bool operatingPoint, double dt, long tickIndex)
     {
         BeginTick();
+        _evalTickIndex = tickIndex;
 
         // ── Structural pass: one rebuild per island scheduled for it. ──
         _dirtyScratch.Clear();
@@ -339,9 +355,22 @@ public sealed partial class Netlist
             }
             // Solo island: a transient one (sine/storage) advances time every tick, so
             // it solves even when untouched (status Ready) — not just dirty (solver.md).
-            if (operatingPoint || _iStatus[slot] == (byte)IslandStatus.Dirty || IslandIsTransient(slot))
+            // A stale runtime (e.g. right after FromCanonical, which nulls every island's
+            // Circuit) means there is no live matrix to read: force a build+solve
+            // regardless of status, matching the Step() gate below — otherwise a Ready,
+            // non-transient island loaded from a memento would be skipped and read 0 V.
+            if (operatingPoint || _iStatus[slot] == (byte)IslandStatus.Dirty || _iRuntimeStale[slot] || IslandIsTransient(slot))
                 NumericSolveIsland(slot, dt, operatingPoint);
         }
+
+        // ── Limits pass: every Ready island, every tick (post-solve; a fuse carrying
+        //    a steady overload keeps heating even if the solver did not re-solve a
+        //    static island). Skipped at the operating point (no time integral). ──
+        if (!operatingPoint)
+            for (var s = 0; s < _iSlotCount; s++)
+                if (_iAlive[s] && _iStatus[s] == (byte)IslandStatus.Ready
+                    && !LimitsEvaluatedThisTick(s, tickIndex))
+                    EvaluateIslandLimits(s, dt, tickIndex);
 
         _tickStatsSealed = true;
     }
@@ -401,13 +430,18 @@ public sealed partial class Netlist
                 rt.Circuit.SetVSourceValue(rt.SineStamps[i], 0.0);
 
         var wasFaulted = _iStatus[slot] == (byte)IslandStatus.Faulted;
-        var status = (operatingPoint || (n == 1 && !hasSine && !wantCompanions))
+        var singleShot = operatingPoint || (n == 1 && !hasSine && !wantCompanions);
+        var status = singleShot
             ? SolveOnce(rt)                                   // DC / plain resistive: one factor+solve
             : StepTransient(rt, n, substepDt);               // BE substep loop (sine + companions)
 
         if (status != SolveStatus.Ok) { FaultIsland(slot, rt, status, wasFaulted); return; }
 
         _iStatus[slot] = (byte)IslandStatus.Ready;
+        // Energy audit + oscilloscope taps for the single-shot path (the substep
+        // loop accumulates its own). Limits are a SEPARATE per-tick pass (a fuse
+        // heats even on a static island the solver did not re-solve — RunSolve).
+        if (singleShot && !operatingPoint) { AccumulateIslandEnergy(slot, tickDt); SampleTaps(slot); }
         if (wasFaulted)
         {
             _iFault[slot] = default;
@@ -700,6 +734,16 @@ public sealed partial class Netlist
                     ? va - vb
                     : (substepDt / _cValue[c]) * (va - vb) + _cStateVar[c];
             }
+
+            // Energy audit (0B scalar accumulation) + oscilloscope taps + limit scan,
+            // all per substep. Limits MUST run per substep on a subcycled-AC island: i²t
+            // is a genuine ∫I²dt over the cycle (a per-tick scan sees one phase sample ×
+            // the full tick dt — phase-biased, and a fuse whose tick-boundary lands at a
+            // sine zero-crossing would never heat), and the instantaneous OverCurrent/
+            // OverVoltage/OverPower checks must see the waveform peak, not the tick edge.
+            AccumulateIslandEnergy(rt.IslandSlot, substepDt);
+            SampleTaps(rt.IslandSlot);
+            EvaluateIslandLimits(rt.IslandSlot, substepDt, _evalTickIndex);
         }
         return SolveStatus.Ok;
     }
@@ -766,6 +810,24 @@ public sealed partial class Netlist
             _ => FaultKind.Singular,
         };
         ComponentRef worst = default; NodeId worstNode = default; int compCount = 0, nodeCount = 0;
+        _iFaultSecond[slot] = default;
+
+        // A singular factorization is often two ideal voltage sources fighting over the
+        // same node pair (parallel V-sources — the constraint rows are inconsistent or
+        // redundant, both singular). Detect that specific, diagnosable case and name the
+        // pair (solver.md Failure Handling; api.md §20) instead of a bare Singular row.
+        if (kind == FaultKind.Singular && DetectContradictorySources(slot, out var cs1, out var cs2))
+        {
+            _iFault[slot] = new FaultDiagnostic(FaultKind.ContradictorySources, cs1, default, 2, 0);
+            _iFaultSecond[slot] = cs2;
+            _iStatus[slot] = (byte)IslandStatus.Faulted;
+            if (wasFaulted) return;
+            var cid = new IslandId(slot, _iGen[slot], _netId);
+            _journal.Append(TopologyEventKind.IslandFaulted, default, default, cid, default);
+            RecordChange(IslandChangeKind.Faulted, cid, default);
+            return;
+        }
+
         if (kind == FaultKind.NewtonDiverged)
         {
             // Attribute to the nonlinear elements that failed to converge (solver.md
@@ -817,6 +879,28 @@ public sealed partial class Netlist
         RecordChange(IslandChangeKind.Faulted, id, default);
     }
 
+    // Scan the island for two ideal voltage sources across the SAME (unordered) node
+    // pair — the canonical over-determined singularity (parallel V-sources). Cold
+    // fault path; O(V²) in the island's source count. Names the first two found.
+    private bool DetectContradictorySources(int islandSlot, out ComponentRef c1, out ComponentRef c2)
+    {
+        c1 = default; c2 = default;
+        for (var i = 0; i < _cCount; i++)
+        {
+            if (!_cAlive[i] || (ComponentKind)_cKind[i] != ComponentKind.VSource || _nIsland[_cA[i]] != islandSlot) continue;
+            for (var j = i + 1; j < _cCount; j++)
+            {
+                if (!_cAlive[j] || (ComponentKind)_cKind[j] != ComponentKind.VSource || _nIsland[_cA[j]] != islandSlot) continue;
+                var same = (_cA[i] == _cA[j] && _cB[i] == _cB[j]) || (_cA[i] == _cB[j] && _cB[i] == _cA[j]);
+                if (!same) continue;
+                c1 = new ComponentRef(ComponentKind.VSource, i, _cGen[i], _netId);
+                c2 = new ComponentRef(ComponentKind.VSource, j, _cGen[j], _netId);
+                return true;
+            }
+        }
+        return false;
+    }
+
     // =============================================================== build
 
     /// <summary>Construct (or reconstruct) an island's Circuit from the current
@@ -851,10 +935,12 @@ public sealed partial class Netlist
         _buildSineComps.Clear(); _buildSineStamps.Clear();
         _buildDiodeComps.Clear(); _buildDiodeStamps.Clear();
         _buildDiodeLocalA.Clear(); _buildDiodeLocalC.Clear();
+        _buildMemberComps.Clear();
 
         for (var c = 0; c < _cCount; c++)
         {
             if (!_cAlive[c] || _nIsland[_cA[c]] != islandSlot) continue;
+            _buildMemberComps.Add(c);
             StampComponent(circuit, c, auxRows, auxComps);
         }
 
@@ -908,10 +994,12 @@ public sealed partial class Netlist
             rt.DiodeIeq[i] = g0 * vd - id0;
         }
         rt.NewtonSave = rt.HasNonlinear ? new double[circuit.Dimension] : Array.Empty<double>();
+        rt.MemberComps = _buildMemberComps.ToArray(); rt.MemberCount = _buildMemberComps.Count;
         rt.IslandSlot = islandSlot;
 
         _iRuntime[islandSlot] = rt;
         _iRuntimeStale[islandSlot] = false;
+        ResetIslandEnergy(islandSlot);   // restart the audit window on a fresh Circuit
     }
 
     private void StampComponent(Circuit circuit, int slot, List<int> auxRows, List<int> auxComps)
@@ -1082,6 +1170,7 @@ public sealed partial class Netlist
         if ((uint)slot >= (uint)_iSlotCount || !_iAlive[slot]) return;
 
         if (_tickStatsSealed) { _lastTickStats = default; _tickStatsSealed = false; }
+        _evalTickIndex = clock.TickIndex;
 
         Debug.Assert(!_iStepping[slot], "Single-writer-per-island violated: concurrent Step on the same island (api.md §11, §21).");
         _iStepping[slot] = true;
@@ -1101,6 +1190,12 @@ public sealed partial class Netlist
                     "Step on a non-lead member of a boundary-coupled scheduling unit (api.md §11) — Step the unit lead.");
                 if (!IsUnitLead(slot)) return;
                 if (UnitNeedsSolve(slot)) StepUnit(slot, clock.Dt, operatingPoint: false);
+                // Limits for every unit member this Step touched (post-solve) — unless the
+                // member already self-scanned per substep this tick (transient members do).
+                for (var m = 0; m < _iSlotCount; m++)
+                    if (_iAlive[m] && _iUnitLead[m] == slot && _iStatus[m] == (byte)IslandStatus.Ready
+                        && !LimitsEvaluatedThisTick(m, clock.TickIndex))
+                        EvaluateIslandLimits(m, clock.Dt, clock.TickIndex);
                 return;
             }
 
@@ -1108,6 +1203,9 @@ public sealed partial class Netlist
             // so it steps even when the document is untouched (Ready) — subcycled AC.
             if (_iStatus[slot] == (byte)IslandStatus.Dirty || _iRuntimeStale[slot] || IslandIsTransient(slot))
                 NumericSolveIsland(slot, clock.Dt, operatingPoint: false);
+            if (_iAlive[slot] && _iStatus[slot] == (byte)IslandStatus.Ready
+                && !LimitsEvaluatedThisTick(slot, clock.TickIndex))
+                EvaluateIslandLimits(slot, clock.Dt, clock.TickIndex);
         }
         finally
         {
@@ -1222,8 +1320,17 @@ public sealed partial class Netlist
         if (rt is null || _iStatus[slot] != (byte)IslandStatus.Ready)
             return new InvariantReport(0.0, default, true, -1, 0.0);
 
-        double kcl = 0.0;
-        if ((which & InvariantChecks.Kcl) != 0) kcl = rt.Circuit.MaxNodeKclResidual();
+        double kcl = 0.0; NodeId worstNode = default;
+        if ((which & InvariantChecks.Kcl) != 0)
+        {
+            kcl = rt.Circuit.MaxNodeKclResidual(out var worstRow);
+            var local = rt.Circuit.NodeForRow(worstRow);
+            if (local >= 0 && local < rt.NodeCount)
+            {
+                var ns = rt.NodeSlots[local];
+                worstNode = new NodeId(ns, _nGen[ns], _netId);
+            }
+        }
 
         var allFinite = true; var firstBad = -1;
         if ((which & InvariantChecks.Finiteness) != 0)
@@ -1232,8 +1339,9 @@ public sealed partial class Netlist
             for (var r = 0; r < v.Length; r++)
                 if (double.IsNaN(v[r]) || double.IsInfinity(v[r])) { allFinite = false; firstBad = r; break; }
         }
-        // Energy (which & Energy): PHASE-6 — returns 0 residual.
-        return new InvariantReport(kcl, default, allFinite, firstBad, 0.0);
+
+        var energyResidual = (which & InvariantChecks.Energy) != 0 ? EnergyResidualOf(slot) : 0.0;
+        return new InvariantReport(kcl, worstNode, allFinite, firstBad, energyResidual);
     }
 
     /// <summary>The island's current AC subcycle plan (api.md §11): N substeps, the
@@ -1263,6 +1371,9 @@ public sealed partial class Netlist
         var f = _iFault[slot];
         var packed = 0;
         if (f.ComponentCount > 0 && comps.Length > 0) { comps[0] = f.Worst; packed++; }
+        // A ContradictorySources fault names BOTH participating sources (§20).
+        if (f.Kind == FaultKind.ContradictorySources && f.ComponentCount > 1 && comps.Length > 1)
+        { comps[1] = _iFaultSecond[slot]; packed++; }
         if (f.NodeCount > 0 && nodes.Length > 0) { nodes[0] = f.WorstNode; }
         return packed;
     }
@@ -1274,8 +1385,9 @@ public sealed partial class Netlist
         if (_iRuntime.Length >= min) return;
         var cap = Math.Max(min, _iRuntime.Length * 2);
         Array.Resize(ref _iRuntime, cap); Array.Resize(ref _iRuntimeStale, cap);
-        Array.Resize(ref _iFault, cap); Array.Resize(ref _iStepping, cap);
+        Array.Resize(ref _iFault, cap); Array.Resize(ref _iFaultSecond, cap); Array.Resize(ref _iStepping, cap);
         Array.Resize(ref _iSubstepN, cap); Array.Resize(ref _iSubstepDt, cap); Array.Resize(ref _iSubstepRawRef, cap);
+        EnsureEnergyCap(cap);
     }
 
     private void EnsureStampCap(int min)

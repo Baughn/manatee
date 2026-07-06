@@ -48,6 +48,7 @@ public sealed partial class Netlist
         Array.Resize(ref _cDiode, cap); Array.Resize(ref _cSine, cap); Array.Resize(ref _cIsSine, cap);
         Array.Resize(ref _cLimits, cap); Array.Resize(ref _cInvalidSeq, cap); Array.Resize(ref _cInvalidKind, cap);
         EnsureStampCap(cap);
+        EnsureLimitCap(cap);
     }
 
     private int ReserveCompSlot()
@@ -117,6 +118,7 @@ public sealed partial class Netlist
         Array.Resize(ref _iGen, cap); Array.Resize(ref _iAlive, cap); Array.Resize(ref _iStatus, cap);
         Array.Resize(ref _iNeedsRebuild, cap); Array.Resize(ref _iNodeCount, cap);
         EnsureRuntimeIslandCap(cap);
+        EnsureLimitEvalTickCap(cap);   // keep the per-substep limit stamp off the alloc path
     }
 
     private int ReserveIslandSlot()
@@ -847,7 +849,10 @@ public sealed partial class Netlist
         => DescribeFaultNumeric(slot, gen, comps, nodes);
 
     internal int DrainLimitEvents(int slot, uint gen, Span<LimitEvent> into)
-    { _ = slot; _ = gen; _ = into; return 0; }   // limit detection is phase 6/8
+        => DrainLimitEventsImpl(slot, gen, into);
+
+    internal int DrainLimitEvents(int slot, uint gen, Span<LimitEvent> into, out long dropped)
+        => DrainLimitEventsImpl(slot, gen, into, out dropped);
 
     internal InvariantReport CheckInvariants(int slot, uint gen, InvariantChecks which)
         => CheckInvariantsNumeric(slot, gen, which);
