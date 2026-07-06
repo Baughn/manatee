@@ -140,7 +140,10 @@ tier-1 source updates.
 ## Component Set
 
 Solver primitives: resistor, V/I sources, capacitor, inductor, switch,
-diode. Everything else is a `devices`-layer composition:
+diode, and the ideal transformer two-port (turns-ratio constraint via
+auxiliary rows — magnetic coupling is not expressible as a composition of
+independent two-terminal elements; api.md §6). Everything else is a
+`devices`-layer composition:
 
 - **Transformer**: two device classes (EA precedent, settled 2026-07-05).
   *Idealized* (small/local): ideal two-port (turns ratio via coupled
