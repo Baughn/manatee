@@ -493,10 +493,28 @@ instances of design.md's existing debit rule:
 - **Transformer boundaries carry an energy-debt feedback**: when cumulative
   delivered-to-B exceeds drawn-from-A minus modeled loss (the one-substep
   lag's over-delivery), the deficit **debits** the B-side feed-forward
-  (droop on the injected amplitude) until the ledger balances — the same
+  (droop on the injected amplitude) until the boundary balances — the same
   mechanism R18 prescribes for the adaptor ("deliverable = advertised −
-  accumulated debt"). Over any window, OutJ ≤ InJ − ModeledLossJ + O(one
-  substep of lag).
+  accumulated debt"). The droop must survive not just a single step and a
+  gain loop but a **driven** pump — an oscillating B load (a blinking
+  switch) — which the phase-5 review showed defeats a naive
+  deadband+leak (each half-cycle's over-delivery hides below the deadband
+  and the per-substep leak bleeds the debt before it accumulates, so the
+  droop never engages and free energy leaks out **linearly, unbounded**,
+  ~2.6% of throughput). The hardened droop closes this with three
+  scale-invariant pieces: a peak-hold **input-throughput** reference (not
+  output — step-up over-delivery inflates the output), a restoring leak
+  **gated on a settled-boundary detector** (smoothed |over| ≤ frac·smoothed
+  throughput — a sustained oscillation never settles, so it cannot launder
+  its debt), and a **wide deadband** so an isolated transient recovers to
+  the exact turns ratio while a sustained pump accumulates past it and
+  chokes. Guarantee: over any window the **driven** over-delivery is a
+  bounded one-time transient (imbalance **slope → 0**; no unbounded ramp),
+  not literally one substep — a sustained pump is caught after a bounded
+  catch-up, then held choked until the load steadies. (A boundary that has
+  been driven into a sustained pump stays choked until the drive stops —
+  the conservative direction; it never invents energy.) See
+  `ConservationAuditTests.Transformer_sustained_load_oscillation_does_not_pump`.
 - **The converter's B port IS the DC-link capacitor** (solver.md said so
   all along: "storage by construction"): A charges it with power bounded by
   the efficiency curve and A's actual delivery; B's voltage is the cap

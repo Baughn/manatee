@@ -147,8 +147,20 @@ public struct LimitEvent
 public readonly record struct ExchangeView(
     double AmplitudeA, double PhaseA, double AmplitudeB, double PhaseB, double PowerA2B);
 
-/// <summary>Boundary-coupler running energy ledger (api.md §7). Zeroed until
-/// phase 5.</summary>
+/// <summary>Boundary-coupler running energy ledger (api.md §7).
+/// <para><see cref="InJ"/>/<see cref="OutJ"/>/<see cref="ModeledLossJ"/> are the
+/// integrated boundary primitives; <see cref="SurplusJ"/> = In − Out − ModeledLoss
+/// (≥ 0 by the recording clamp) becomes <see cref="HeatDumpedJ"/> = ModeledLoss +
+/// max(Surplus,0) (≥ 0 by construction — design.md energy rule).</para>
+/// <para><b><see cref="Residual"/> is a CLOSURE IDENTITY, not a conservation signal</b>
+/// (ruled 2026-07-06). It equals In − Out − HeatDumped ≈ 0 <i>by construction</i> and
+/// therefore can NEVER report a physical violation — do not use it as one. The ledger
+/// RECORDS; it does not license. Whether a boundary actually conserved energy is
+/// established by a <b>windowed physical audit</b> (source energy = dissipation +
+/// Δstored + coupler heat, summed over both islands from public node-voltage
+/// readbacks), and conservation itself is enforced upstream by the transformer
+/// debt-droop and the sagging converter DC-link capacitor — not by the recording
+/// clamp.</para></summary>
 public readonly record struct EnergyLedger(
     double InJ, double OutJ, double ModeledLossJ, double SurplusJ, double HeatDumpedJ, double Residual);
 

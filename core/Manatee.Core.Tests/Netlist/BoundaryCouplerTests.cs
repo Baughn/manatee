@@ -179,9 +179,26 @@ public sealed class BoundaryCouplerTests
         Assert.Equal(expectedEff, pOut / pIn, 4);                    // efficiency curve honored
 
         var led = net.Islands.Of(aPos).Ledger(c);
-        Assert.Equal(0.0, led.Residual, 9);                          // conserved by construction
+        Assert.Equal(0.0, led.Residual, 9);                          // closure identity holds
         Assert.True(led.ModeledLossJ > 0.0);                        // efficiency loss is EXPLICIT
-        Assert.Equal(led.ModeledLossJ, led.HeatDumpedJ, 9);         // …and becomes heat
+
+        // DEVIATION (api.md §7 conservation ruling, 2026-07-06): the B port is now the
+        // regulated DC-link CAPACITOR + a charge controller, not an ideal setpoint source.
+        // The old ideal source delivered exactly P_out/η every substep, so cumulative
+        // HeatDumpedJ == ModeledLossJ EXACTLY. The regulated cap instead has a bounded
+        // one-time STARTUP transient (the DC-link settling from cold), during which a small
+        // surplus is honestly dumped as heat on top of the efficiency loss. So the exact
+        // cumulative equality is replaced by its physical content: heat is AT LEAST the
+        // efficiency loss, and at STEADY STATE every joule of dumped heat IS the efficiency
+        // loss — the per-tick INCREMENTS match to machine precision (no surplus once
+        // settled). The startup offset is < 3% of throughput and never recurs.
+        Assert.True(led.HeatDumpedJ >= led.ModeledLossJ - 1e-9);
+        Assert.True(led.HeatDumpedJ - led.ModeledLossJ < 0.03 * led.OutJ);
+        var before = net.Islands.Of(aPos).Ledger(c);
+        Settle(net, 40);
+        var after = net.Islands.Of(aPos).Ledger(c);
+        Assert.Equal(after.ModeledLossJ - before.ModeledLossJ,
+                     after.HeatDumpedJ - before.HeatDumpedJ, 9);     // steady state: all heat is loss
     }
 
     [Fact]

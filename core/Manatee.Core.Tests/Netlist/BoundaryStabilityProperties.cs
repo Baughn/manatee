@@ -214,12 +214,20 @@ public sealed class BoundaryStabilityProperties
         {
             var (alpha, r0, r1) = t;
             var rig = BuildConv(r0, alpha);
-            for (var i = 0; i < 200; i++)
+            // Pre-step settle window: 500 ticks, not 200. Under the api.md §7 ruling the B port is
+            // the DC-link CAPACITOR driven by a charge controller, not the old ideal setpoint
+            // source that pinned V_B = 50 V from tick 1. The controller reaches the setpoint with
+            // ZERO steady-state error but through a real RC-like transient whose rate is set by the
+            // α-smoothed A-draw: the SLOWEST corner the generator samples (α = 0.05 at the heaviest
+            // 2.5 Ω load) needs ~500 ticks to hold V_B to 3 decimals (measured: err 7.8e-4 at 400,
+            // 5.0e-5 at 500). 200 ticks left that corner at ~0.2 V and read as a flaky red. This is
+            // the intended cap settling time, not a defect — the assert below bounds it.
+            for (var i = 0; i < 500; i++)
             {
                 rig.Net.Solve(new TickClock(i + 1, 0.05));
                 AssertFinite(rig.Net, rig.APos, rig.Coupler, $"settle t={i}");
             }
-            // Regulated setpoint held throughout the pre-step settle.
+            // Regulated setpoint held (to 3 decimals) once the cap has settled.
             Assert.Equal(50.0, rig.Net.Solution.Voltage(rig.BPos), 3);
 
             rig.Net.Adjust(rig.Load, r1);
@@ -397,14 +405,14 @@ public sealed class BoundaryStabilityProperties
         // at 2.0, so the loop voltage gain 1/(n1·n2) sweeps a band rather than sitting at one
         // point. Decay across the band must come from the RC/series-resistor dissipation.
         //
-        // NOTE (escalated to canon): pushing to the stability boundary and PAST it —
-        // gain-capable turns with n1·n2 ≤ 1 (e.g. 0.5/0.5 ⇒ loop gain 4) — makes this loop
-        // GROW (seeded 8.6 J → 85.5 J; even product≈1 creeps above the floor), because the
-        // relaxation-lag boundary exchange is NOT conservative by construction and a
-        // voltage-gain loop pumps the lag residue. That is the deeper coupler-conservation
-        // design item (the clamp bounds the ledger scalar, not the physical injection), not
-        // a turns-range choice; kept comfortably dissipative here so this guard tests
-        // dissipation, with the non-conservation tracked separately.
+        // NOTE (RESOLVED by the api.md §7 conservation ruling, 2026-07-06): pushing PAST the
+        // stability boundary — gain-capable turns n1·n2 ≤ 1 (e.g. 0.5/0.5 ⇒ loop gain 4) —
+        // used to make this loop GROW (seeded 8.6 J → 85.5 J), because the relaxation-lag
+        // boundary exchange was not conservative and a voltage-gain loop pumped the lag
+        // residue. The transformer DEBT DROOP now debits that over-delivery, forcing the
+        // loop dissipative; the gain-capable case is its own acceptance gate,
+        // ConservationAuditTests.Gain_capable_two_coupler_loop_decays_from_seeded_energy.
+        // This test keeps the well-damped turns range so it isolates plain RC dissipation.
         var gen =
             from alpha in Gen.Double[0.2, 1.0]
             from ra in Gen.Double[50.0, 400.0]

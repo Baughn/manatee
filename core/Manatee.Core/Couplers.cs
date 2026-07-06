@@ -53,11 +53,16 @@ public readonly struct CouplerSpec
     public static CouplerSpec DecouplingTransformer(in TransformerParams p, double relaxationAlpha = 0.5)
         => new() { Kind = Family.DecouplingTransformer, Transformer = p, RelaxationAlpha = relaxationAlpha };
 
-    /// <summary>Behavioral P-transfer with efficiency curve and a real DC-link
-    /// capacitor as boundary storage. Both sides stay linear: the B port is held at
-    /// <paramref name="outputVolts"/>, P_out is measured, P_in = P_out / efficiency
-    /// is drawn from A, and the efficiency loss becomes coupler heat. Load fraction
-    /// for the curve is P_out / <paramref name="ratedWatts"/>.</summary>
+    /// <summary>Behavioral P-transfer whose B port IS the DC-link capacitor (api.md §7
+    /// conservation ruling, 2026-07-06). Both sides stay linear per substep: a charge
+    /// controller injects current into the cap regulating it toward
+    /// <paramref name="outputVolts"/>, with the injected power bounded by
+    /// min(<paramref name="ratedWatts"/>, η · what A delivered last substep); the cap
+    /// voltage SAGS honestly under deficit (brownout, not deadlock). P_out is measured,
+    /// P_in = P_out / efficiency is drawn from A, and the independent-curve efficiency
+    /// loss becomes coupler heat. Load fraction for the curve is
+    /// P_out / <paramref name="ratedWatts"/>. If <paramref name="dcLinkFarads"/> ≤ 0 an
+    /// honestly-sized default is synthesised (the port must have real storage).</summary>
     public static CouplerSpec ConverterTwoPort(in EfficiencyCurve e, double dcLinkFarads,
         double outputVolts, double ratedWatts, double relaxationAlpha = 0.5)
         => new()
