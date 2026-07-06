@@ -6,4 +6,12 @@
     <RootNamespace>Manatee.Core</RootNamespace>
   </PropertyGroup>
 
+  <!-- Manatee.Core.Solver is internal (api.md §2): only the test referee, the
+       ngspice oracle, and the benchmark harness see the matrix layer. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Manatee.Core.Tests" />
+    <InternalsVisibleTo Include="Manatee.Oracle" />
+    <InternalsVisibleTo Include="Manatee.Benchmarks" />
+  </ItemGroup>
+
 </Project>
