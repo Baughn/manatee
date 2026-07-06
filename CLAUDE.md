@@ -47,7 +47,8 @@ see `third_party/CLAUDE.md` for what's there and the decompile caveats.
   Findings graduate into `docs/` with file:line references.
 - Collaboration: Sukasa (Re-Volt's author) is the Stationeers-side partner;
   integration decisions affecting Re-Volt get relayed for his sign-off.
-  Re-Volt is MIT → manatee-core is MIT (CSparse.NET stays a separate LGPL DLL).
+  Re-Volt is MIT → manatee-core is MIT (CSparse.NET is dev/test-only LGPL,
+  never shipped).
 
 ## Practical notes
 

@@ -153,6 +153,33 @@ simulations co-simulate loosely coupled, which is stable because both ends
 have inertia. Overheat exists at node speed > 4.5
 (`MechanicalPowerMod.cs:168-189`) — a natural over-rev hazard for motors.
 
+**The averaging window is normative** (settled 2026-07-06, closing the
+2f-aliasing hole): single-phase AC power pulsates at twice electrical
+frequency — ~10 Hz at 5 Hz, right at the ~100 ms mechanical re-sum
+cadence — so a *sampled* counter-torque would alias into a
+phase-dependent DC torque offset (phantom or free torque).
+`GetResistance()` therefore returns the **mean over all electrical
+substeps since the previous mechanical read**, never an instantaneous
+sample; it must also be a pure read of that cached mean, valid at any
+time on the server main thread (out-of-band `updateNetwork` calls exist —
+`BEBehaviorWindmillRotor.cs:197`). The standing invariant test: a closed
+motor→shaft→alternator→motor loop must monotonically decay from any
+initial condition (testing-strategy.md).
+
+**Frequency arithmetic** (verified 2026-07-05, decided 2026-07-06): the
+engine integrates shaft angle such that ω = 5·speed rad/s
+(`MechanicalNetwork.cs:156-158,185-189`), so electrical frequency
+f ≈ 0.8 × speed × polePairs Hz. **No fudge factor.** Pole-pair count is
+the honest knob: a starter alternator at 2–4 pole pairs gives ~3–6 Hz at
+ordinary shaft speeds; the advanced high-pole-count machine at ~12–20
+pairs reaches ~40–60 Hz near (but under) the overheat ceiling — the same
+shape as real hydro alternators. The economics are deliberate:
+**pole pieces are hand-smithed on the anvil** (VS's smithing minigame),
+so high pole count costs labor as well as metal, and the future workshop
+arc (1800s-tech powered machinery — drop hammers, rolling mills, gang
+punches; historically exactly how repeated identical parts like pole
+laminations were made) becomes the earned escape from hand-forging.
+
 ## Rooms and Heat
 
 **Room detection** exists (`vsessentialsmod/Systems/RoomRegistry.cs`;

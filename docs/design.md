@@ -52,7 +52,19 @@ through play. Classroom use is a possible later bonus, not a design driver.
 
 Failure model corollary: hazards (fires, melted cables, shocks) must always
 trace back to **player mistakes** — never to random external events. A player
-whose house burned down should be able to say what they got wrong.
+whose house burned down should be able to say what they got wrong. The
+mistake need not be *visible in advance* item-by-item, but the rule that
+makes it a mistake must be knowable (see the li-ion loot policy under
+Ruins loot: the class property is taught; the siting is the mistake).
+
+Mastery corollary (settled 2026-07-06): **every learned skill gets an
+automation off-ramp.** A mechanic that is a thrill the first five times
+and a chore forever after ships a craftable convenience once mastered —
+the pre-wired elevator controller, DC lighting versus flicker, a
+sync-check breaker that blocks out-of-phase closure while the player
+still matches speed by ear. The off-ramp is a convenience, never a
+requirement; this is the difference between a curriculum and a
+treadmill.
 
 ## The Three Clients
 
@@ -144,7 +156,11 @@ Each requirement is justified by the purpose above.
 - **R13. Frictionless placement.** Cable-laying via pathfinding (as in
   sparky); the physical act of building must not be the hard part. The
   pathfinder routes conductor *pairs* by default (two-wire idiom — see
-  Grounding model); one gesture lays supply and return.
+  Grounding model); one gesture lays supply and return. The mandate
+  extends to **maintenance** (settled 2026-07-06): consumables — zinc
+  plates, carbon rods, sun-lamp elements, burned cable sections — swap
+  in one interaction. Realism decides *that* parts wear; interaction
+  cost must never be where the difficulty lives.
 - **R14. Mechanical coupling.** Alternators load the mechanical network with
   torque proportional to electrical load; motors do the reverse. Frequency =
   shaft speed × pole pairs. *Justification: VS's mechanical network gives AC
@@ -152,9 +168,21 @@ Each requirement is justified by the purpose above.
 - **R15. Instruments.** Multimeter item; V/I/temperature in the block hover
   tooltip by default (config option to require the item, for realism
   purists); an oscilloscope item (themed as a pencil-servo plotter) showing
-  real waveforms.
+  real waveforms. **Readouts teach** (settled 2026-07-06): tooltips name
+  the condition in words and point upstream, never just numbers — "0 A —
+  circuit incomplete", "8.2 V (rated 12 V) — undervoltage", "14 A through
+  an 8 A-rated section" (attribution already knows the weakest voxel);
+  electrode tooltips attribute contact-resistance drop and wetness;
+  alternators show live volts and hertz; consumables show mass remaining.
+  Breakers report V and I at the moment of trip — V/I ≈ distance to the
+  short, one division, so fault-locating is a taught skill rather than a
+  mystery walk.
 - **R16. The tablet.** Falstad-netlist import; guided lessons + sandbox;
   finding it may gate advanced recipes, completing lessons gates nothing.
+  **The vanilla survival handbook is the floor; the tablet is the ceiling**
+  (settled 2026-07-06): every mod mechanic ships a handbook entry — the
+  handbook is the only teaching channel that reaches tablet-refusers, and
+  authoring it is an explicit workstream, not polish.
 - **R17. Vanilla microblock integration.** Cable voxels inside chiseled
   blocks are real microblock voxels: cable materials are chisel materials
   (`canChisel: true`), and electrical semantics live in a mod BE *behavior*
@@ -178,7 +206,11 @@ Each requirement is justified by the purpose above.
 
 - **R18. Adaptor for the vanilla 4-call power API.** Unconverted devices are
   constant-power elements, linearized across ticks (G = P/V_prev², clamped;
-  undervoltage ⇒ brownout dropout). Native conversions replace the adaptor
+  undervoltage ⇒ brownout dropout **with hysteresis** — drop at V_low,
+  rejoin at V_high, per-device staggered rejoin delays, and recloser-style
+  lockout after repeated brownouts in a short window (manual reset), so an
+  overloaded net settles or collapses legibly instead of strobing at tick
+  rate — settled 2026-07-06). Native conversions replace the adaptor
   per-device, gradually. Vanilla state stays maintained so removing the mod
   reverts cleanly. Each adapted device carries an across-tick **energy
   ledger** (deliverable this tick = advertised − accumulated debt), so the
@@ -305,10 +337,19 @@ high-pole-count alternators (see frequency below).
 electrolysis/electroplating (Faraday's laws as economics; may pull forward
 into arc 2 if a light use case appears). Power-hungry; deliberately deferred.
 
-**Ruins loot:** lithium-ion batteries from the world-before — high capacity,
-missing all their safeties, and sometimes already about to blow. A treasure,
-a hazard, and a chemistry lesson in one item. (Also fictional cover for
-battery models being behavioral: all batteries ship as electrical models with
+**Ruins loot:** lithium-ion batteries from the world-before — enormous
+capacity, missing all their safeties, and **all of them doomed** (settled
+2026-07-06): every looted cell eventually fails violently; age and abuse
+only decide when. Per-cell degradation is deliberately *invisible* — the
+art style can't honestly telegraph it, and inspection-lottery gameplay is
+not the point. The player's mistake is **siting**: deployed in a stone
+basement with good ventilation, a cell's inevitable death is a contained
+loss; built into a wooden wall, it's the house. The handbook and tablet
+both state the class property outright — the intended loop is a temporary
+bypass of early bootstrapping for players who already understand power,
+paid for in containment, and the standing lesson is why modern cells ship
+with the safeties these ones lost. (Also fictional cover for battery
+models being behavioral: all batteries ship as electrical models with
 chemistry stubbed out; the future chemistry arc may deepen them.)
 
 A future separate arc (chemical/phase-change simulation à la Stationeers) may
@@ -388,7 +429,13 @@ without noticing.
 **Earth is still an ordinary solver node** reached through
 **per-electrode contact resistance** (tens of ohms, better when wet):
 grounding-rod quality stays a real, teachable parameter, and "bare
-conductors ground when wet" falls out of the same mechanism.
+conductors ground when wet" falls out of the same mechanism. Electrodes
+carry their own limit envelope (R7, settled 2026-07-06): sustained
+overload dries and then glassifies the surrounding soil, *raising*
+contact resistance — honest negative feedback that caps earth's ampacity
+per electrode, so electrode farms cost real material and land instead of
+deleting the wire-gauge economics. Deliberate wetting (a pool over the
+rod) stays legal; it's real practice and a fair reward.
 **Ground-return (SWER) becomes a user-visible choice, not the
 default** — it earns its keep exactly where the real arithmetic works:
 high-voltage distribution (240 V long runs), and milliamp signalling
@@ -438,7 +485,15 @@ wooden buildings make fire a genuine threat). Sustained low-level overload
 makes surface voxels of the cable disappear — visibly ruining insulation and
 worsening the problem until it burns through or burns the house down.
 Degradation is the warning. Shock damage uses voltage relative to global
-ground with realistic thresholds (12 V is safe to touch; 240 V is not).
+ground with realistic thresholds, and first-contact damage scales with
+voltage: 12 V control wiring is a tingle, 48 V a bite, 240 V lethal.
+
+**Hidden conductors telegraph themselves** (settled 2026-07-06): block
+info on a chiseled block discloses an energized conductor inside (R15's
+default-on surface — a guest must never die to wiring the block itself
+wouldn't admit to), and energized AC conductors hum audibly at close
+range. The hum is diegetic, real, and a free lesson — DC's silence is
+itself diagnostic.
 
 **Cable voxels are never protected from the chisel.** Chiseling out cable
 material salvages it at a loss (wire bits, not intact wire); insulation
@@ -446,7 +501,15 @@ chisels separately (it is a separate material). Chiseling into a *live*
 conductor shocks you — the protection mechanism is turning off the breaker
 first, i.e. lockout-tagout as an emergent skill. If a player wants to chop
 their cable in half, they presumably have a reason; if they told a friend to
-do it, the reason is presumably amusement.
+do it, the reason is presumably amusement. Salvage and burn-off are lossy
+in **mass**, not just convenience: wire bits re-smelt to less metal than
+went in, and overload-destroyed insulation is simply gone — no
+strip-and-resmelt loop (settled 2026-07-06).
+
+Griefing beyond physics — sabotage of unclaimed long runs, energized
+traps — is a **server-governance problem**: vanilla claims, block
+logging, and bans. The mod contributes legible fault-finding (R15's
+breaker trip reports, the AC hum) and adds no protection special cases.
 
 ### The tablet
 
@@ -512,8 +575,9 @@ material, not built, not licensed as part of this project. The Stationeers
 integration lives in Re-Volt's repository, consuming manatee-core as a git
 submodule.
 
-Licensing: Re-Volt is MIT, so manatee-core is MIT. CSparse.NET (LGPL) stays
-a separate unmodified DLL dependency, which is compatible.
+Licensing: Re-Volt is MIT, so manatee-core is MIT. CSparse.NET (LGPL) is a
+dev/test-only dependency (equivalence oracle — solver.md Numerics, revised
+2026-07-06) and ships in no mod, so no LGPL artifact reaches players.
 
 ## Delivery Order
 
@@ -557,9 +621,9 @@ storage is modeled but not relied on; DC converter two-ports carry a real
 DC-link capacitor — solver.md, Islands); grounding was first settled as
 SWER-the-starter-idiom, then revised the same day to two-wire-default
 with SWER as a user-visible choice (see Grounding model); and the solver backend is an
-interface — in-house zero-alloc dense LU primary, CSparse.NET as interim
-large-island fallback, in-house sparse refactor only if benchmarks demand
-(solver.md, Numerics).
+interface — first settled as dense-primary with CSparse fallback, then
+revised 2026-07-06 on benchmark evidence to in-house sparse LU as the sole
+production backend (solver.md, Numerics).
 
 Deferred by design: chemistry-arc details (batteries ship as behavioral
 electrical models; manatee-core avoids electrical-only naming in its deepest

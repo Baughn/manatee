@@ -115,6 +115,11 @@ Always-on in debug builds, assertable in any test:
   just per-exchange clamping.
 - **Finiteness**: no NaN/Inf anywhere in a solution vector, ever (solver.md
   failure handling).
+- **Coupling dissipativity** (added 2026-07-06, the 2f-aliasing guard): a
+  closed motor→shaft→alternator→motor loop must monotonically decay from
+  any initial condition. Both integrators are dissipative, so any failure
+  indicts the mech↔elec coupling — specifically the counter-torque
+  averaging window (vintage-story.md, Mechanical Network Coupling).
 
 ## Equivalence Tests
 

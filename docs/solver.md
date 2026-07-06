@@ -88,8 +88,8 @@ matrices.
 | 3. Topology | add/remove component or node | full symbolic + numeric rebuild of the island | construction churn; batched |
 
 Implementation notes:
-- Matrix built as coordinate storage with duplicate-summing stamps
-  (CSparse); stamps versioned so an unchanged (pattern, values, dt) skips
+- Matrix built as coordinate storage with duplicate-summing stamps;
+  stamps versioned so an unchanged (pattern, values, dt) skips
   straight to the cached factorization (sparky's fast path).
 - Tier 2 requires separating symbolic analysis from numeric factorization
   (KLU-style refactor). Sparky refactored from scratch; we don't.
@@ -234,20 +234,25 @@ diagonals to keep floating subgraphs non-singular.
 
 ## Numerics
 
-- Backend plan (settled 2026-07-05): a solver-backend interface from day
-  one. CSparse.NET (LGPL — separate unmodified DLL; MIT core) exposes
-  neither pattern-reusing numeric refactorization nor allocation-free
-  solves, so it cannot carry tier 2 or the zero-alloc gate. Therefore: an
-  in-house zero-alloc dense LU is the primary backend (post-compaction
-  islands are small enough that it covers nearly everything, and dense has
-  no symbolic phase to reuse — tier 2 is trivially supported); CSparse.NET
-  is retained behind the interface as the interim large-island fallback
-  (allocations tolerated there); an in-house KLU-style sparse refactor is
-  written only if benchmarks demand it. (Native KLU/SuiteSparse via
-  P/Invoke was rejected: per-platform native binaries are a
-  mod-distribution burden.)
-- Dense in-place LU with partial pivoting below ~100 unknowns or above ~0.18
-  density (sparky's measured crossover; re-benchmark, don't assume).
+- Backend plan (settled 2026-07-05; **revised 2026-07-06 on benchmark
+  evidence** — docs/experiments/2026-07-05-backend-competition.md): a
+  solver-backend interface from day one, but the roles flipped. The
+  benchmarks the earlier plan asked for arrived: an in-house KLU-style
+  sparse LU (fill-reducing ordering + symbolic plan in Analyze, pivot
+  order frozen at first numeric factorization, zero-alloc refactorize and
+  solve) beats optimized dense on the tier-1 hot path at *every* size
+  tested, including n=100 (907 ns vs 2.5 µs), and CSparse.NET is strictly
+  dominated (2–4× slower, plus an unavoidable 8n+24 B allocation per
+  refactorization through its public API). Therefore: **the in-house
+  sparse LU is the primary and only production backend**; the naive dense
+  LU survives as the test referee (cross-agreement in CI); CSparse.NET is
+  demoted to a dev-time equivalence oracle and ships in no mod (which
+  also removes the LGPL DLL from distribution). Frozen-pivot robustness
+  was stress-tested across the full legal conductance range (200 full
+  redraws, worst scaled residual 1.7e-9, zero failures); a pivot-growth
+  monitor with refactor-from-scratch fallback is cheap hygiene, not a
+  stability requirement. (Native KLU/SuiteSparse via P/Invoke stays
+  rejected: per-platform native binaries are a mod-distribution burden.)
 - Conductance-range policy (settled 2026-07-05): stamped conductances live
   in [1e-9, 1e3] S — 1 GΩ open switch … 1 mΩ closed switch / DC inductor
   short (SPICE-conventional) — with gmin = 1e-12 S. Rationale: doubles
@@ -286,10 +291,9 @@ The acceptance bar is Re-Volt's worker thread (the stricter environment):
 
 - No engine/Unity/VS API anywhere in manatee-core.
 - Steady-state ticking (tiers 1–2) allocates zero bytes after warmup;
-  BenchmarkDotNet MemoryDiagnoser enforces this in CI. (Enforced on the
-  in-house dense path, which covers post-compaction island sizes; the
-  CSparse large-island fallback is exempt until/unless the in-house sparse
-  refactor lands — see Numerics.)
+  BenchmarkDotNet MemoryDiagnoser enforces this in CI, with no exemptions —
+  the sole production backend (in-house sparse LU, see Numerics) meets the
+  gate at every island size.
 - All solver state is confined to its island; islands are independently
   lockable; the API is single-writer-per-island, enforced by debug asserts
   rather than locks (clients own scheduling).
