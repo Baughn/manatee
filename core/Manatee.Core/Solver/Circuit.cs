@@ -102,6 +102,12 @@ internal sealed class Circuit
     private double _maxSetG = 0.0;
     private bool _ratioWarned;
 
+    // Work signals for the netlist layer's tier accounting (§9): whether the most
+    // recent FactorizeIfDirty actually refactored (tier 2) and whether the most
+    // recent Solve back-substituted (tier 1). Read straight after the call.
+    private bool _didFactor;
+    private bool _didSolve;
+
     /// <param name="backend">The linear backend this circuit drives.</param>
     /// <param name="nodeCount">Number of node potentials (excludes aux rows).</param>
     /// <param name="referenceNode">Datum node to eliminate, or −1 to auto-anchor node 0.</param>
@@ -145,6 +151,28 @@ internal sealed class Circuit
 
     /// <summary>Details of the current fault (see <see cref="Faulted"/>).</summary>
     public FaultInfo Fault => _fault;
+
+    /// <summary>True iff the most recent <see cref="FactorizeIfDirty"/> ran an
+    /// actual numeric factorization (tier 2) rather than short-circuiting on an
+    /// unchanged signature. The netlist layer reads this to count
+    /// <c>TickStats.Refactorizations</c>.</summary>
+    public bool DidFactor => _didFactor;
+
+    /// <summary>True iff the most recent <see cref="Solve"/> ran an actual
+    /// back-substitution (tier 1) rather than short-circuiting on a standing
+    /// fault. The netlist layer reads this to count <c>TickStats.RhsSolves</c>.</summary>
+    public bool DidSolve => _didSolve;
+
+    /// <summary>The local node index whose MNA row is <paramref name="row"/>, or
+    /// −1 if no node maps to it (an auxiliary branch row, or the reference).
+    /// Cold diagnostic path (fault attribution), linear in node count.</summary>
+    public int NodeForRow(int row)
+    {
+        if (row < 0) return -1;
+        for (var n = 0; n < _nodeRow.Length; n++)
+            if (_nodeRow[n] == row) return n;
+        return -1;
+    }
 
     // ================================================================= build
 
@@ -385,6 +413,7 @@ internal sealed class Circuit
     public SolveStatus FactorizeIfDirty()
     {
         Debug.Assert(_analyzed, "FactorizeIfDirty before Analyze");
+        _didFactor = false;
 
         // Signature match is computed independently of _numericReady so an
         // UNCHANGED *faulted* island short-circuits too. solver.md Failure
@@ -400,6 +429,7 @@ internal sealed class Circuit
             return _fault.Status;   // Ok, or a still-standing fault on an unchanged system
 
         AssembleValues();
+        _didFactor = true;
         try
         {
             _backend.Factorize(_patternValues);
@@ -435,10 +465,12 @@ internal sealed class Circuit
     public SolveStatus Solve()
     {
         Debug.Assert(_analyzed, "Solve before Analyze");
+        _didSolve = false;
 
         if (!_numericReady)
             return _fault.Status == SolveStatus.Ok ? SolveStatus.Singular : _fault.Status;
 
+        _didSolve = true;
         AssembleRhs();
         _backend.Solve(_rhs, _solutionBack);
 

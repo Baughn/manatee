@@ -504,7 +504,10 @@ public ref struct AllocationSentinel        // standalone tripwire; auto-armed i
 (fail-fast — this is the "someone rebuilt the world inside CalculateState"
 bug). Release: the op is **deferred to the guard's `Dispose`**, executed
 there exactly as if called at that point (same handle semantics, §17), logged,
-and counted in `TickStats.DeferredStructuralOps`. The deferral is therefore
+and counted in `TickStats.DeferredStructuralOps`. **Exception (ratified
+2026-07-06):** `Edit()` throws `InvalidOperationException` in *all* build
+modes — a live `StructuralEdit` scope cannot be coherently deferred; the
+deferral machinery models `Reconfigure` (coupler id + state) only. The deferral is therefore
 bounded *within the same tick, before `Solve`* — a breaker `Open` attempted
 inside the guard still lands this tick; an island is never left energized
 across a tick through a breaker the game believes is open. Deferred ops are
