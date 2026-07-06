@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The runnable half of docs/integration-tutorial.md: a miniature
+       Re-Volt-shaped client built in tutorial order. net8.0 only — this is a
+       teaching console app, not a shipping assembly (Manatee.Core itself
+       multitargets netstandard2.1 for Unity). -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>Manatee.Example.RevoltWalkthrough</RootNamespace>
+    <AssemblyName>Manatee.Example.RevoltWalkthrough</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\core\Manatee.Core\Manatee.Core.csproj" />
+  </ItemGroup>
+
+</Project>

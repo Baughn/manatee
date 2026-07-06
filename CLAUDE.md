@@ -23,6 +23,7 @@ binding as-built surface. Next: 2D schematic harness, then Re-Volt / VS.
 | `docs/compaction.md` | Reduction layer: series collapse, probe interpolation, limit attribution, incremental maintenance + resync backstop. |
 | `docs/vintage-story.md` | VS client: microblock integration (verified engine facts with file:line), mechanical coupling, rooms/heat, tooltips, wire rendering. |
 | `docs/stationeers.md` | Re-Volt integration: seams, legacy-device adaptor, islands via couplers, verified threading model of the game. |
+| `docs/integration-tutorial.md` | Worked tutorial for coding against manatee-core (narrates `examples/RevoltWalkthrough/`, the runnable authority): mental model, tick loop, handle survival, save/load, sharp-edges appendix. |
 | `docs/testing-strategy.md` | ngspice oracles, lesson corpus as CI goldens, invariants, equivalence tests, toolchain. The math is treated as untrusted input. |
 | `docs/harness.md` | 2D harness / tablet engine: three pure layers (document, interaction SM, display-list view), rendering backends, headless testing model. |
 | `docs/curriculum.md` | Tablet lesson arc (17 lessons, DC → AC power) and authoring rules. |

@@ -17,6 +17,10 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tablet", "tablet", "{7CBD94
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Manatee.Harness", "tablet\Manatee.Harness\Manatee.Harness.csproj", "{B690331F-0D72-431D-BEE9-263CE181E598}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "examples", "examples", "{E27F88FD-44FF-419C-A108-D2F0521A4C08}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Manatee.Example.RevoltWalkthrough", "examples\RevoltWalkthrough\Manatee.Example.RevoltWalkthrough.csproj", "{FD967CD7-2ED4-464E-AF4B-661AF260892D}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -46,6 +50,10 @@ Global
 		{B690331F-0D72-431D-BEE9-263CE181E598}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{B690331F-0D72-431D-BEE9-263CE181E598}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{B690331F-0D72-431D-BEE9-263CE181E598}.Release|Any CPU.Build.0 = Release|Any CPU
+		{FD967CD7-2ED4-464E-AF4B-661AF260892D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{FD967CD7-2ED4-464E-AF4B-661AF260892D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{FD967CD7-2ED4-464E-AF4B-661AF260892D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{FD967CD7-2ED4-464E-AF4B-661AF260892D}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{08CEA13D-125C-479F-9E3C-12D3F8EC8746} = {ACA9E4F6-D75D-4D69-A9A4-ECC038762781}
@@ -53,5 +61,6 @@ Global
 		{CBC7A766-F314-40E4-BAE2-1449D7668585} = {ACA9E4F6-D75D-4D69-A9A4-ECC038762781}
 		{CCF5B096-BE6F-4831-88FC-934DB27BF5D3} = {ACA9E4F6-D75D-4D69-A9A4-ECC038762781}
 		{B690331F-0D72-431D-BEE9-263CE181E598} = {7CBD9458-2595-42AD-A706-67B95ACD0DC1}
+		{FD967CD7-2ED4-464E-AF4B-661AF260892D} = {E27F88FD-44FF-419C-A108-D2F0521A4C08}
 	EndGlobalSection
 EndGlobal
