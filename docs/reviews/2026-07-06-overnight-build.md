@@ -118,6 +118,18 @@ any α > 0.7 config).
 - Benchmarks: suites in place with MemoryDiagnoser + tier-budget gates;
   smoke-verified only — full BDN runs not executed tonight (`scripts/bench.sh`).
 
+## Addendum (post-report, same session)
+
+The integration tutorial you asked for landed as
+`docs/integration-tutorial.md` + the runnable `examples/RevoltWalkthrough/`
+(commits `4aeaff0c`, `38802e14`). Writing it exposed a real contract
+violation none of the 362 tests had hit — absorbed-side merge-window reads
+returned 0.0 instead of last-good, turning naive G=P/V² adaptors into
+phantom dead shorts. Fixed in favor of canon; the follow-through also
+settled **decision log 27** (Faulted islands read de-energized, enforced at
+the read path — a published-then-faulted island no longer leaks pre-fault
+values). That ruling is the one new item added to your review list above.
+
 ## Suggested next steps
 
 1. Your review of api.md §23/§24 + this report's judgment list.
