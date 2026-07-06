@@ -30,6 +30,8 @@ public sealed partial class Netlist
     private readonly NetlistOptions _opts;
     private readonly bool _debug;
     private readonly double _profileDt;
+    private readonly SolverProfile.Regime _profileKind;   // regime discriminant (§5)
+    private readonly int _acSamplesPerCycle;              // Mixed: substep sample target (default 20)
     private readonly double _ratioLo, _ratioHi;      // ε-no-op bounds, pinned at construction (api.md §9)
     private readonly TopologyJournal _journal;
 
@@ -58,6 +60,11 @@ public sealed partial class Netlist
     // ── Component SoA ──
     private uint[] _cGen; private bool[] _cAlive; private byte[] _cKind;
     private int[] _cA, _cB, _cC, _cD; private double[] _cValue;
+    // Serializable dynamic state per stateful primitive (§14): capacitor voltage
+    // (a→b), inductor current (a→b), or sine phase accumulator (radians). _cStatePrev
+    // carries the value at the start of the last-integrated substep — the BE capacitor
+    // current readback (C·(V−V_prev)/dt) needs it after _cStateVar has been advanced.
+    private double[] _cStateVar; private double[] _cStatePrev;
     private ExternalKey[] _cKey; private StateKey[] _cState;
     private DiodeParams[] _cDiode; private SineDrive[] _cSine; private bool[] _cIsSine;
     private LimitSpec[] _cLimits;
@@ -111,6 +118,8 @@ public sealed partial class Netlist
         _netId = (ushort)System.Threading.Interlocked.Increment(ref s_netCounter);
         _debug = opts.Debug != DebugLevel.Off;
         _profileDt = opts.Profile.Dt;
+        _profileKind = opts.Profile.Kind;
+        _acSamplesPerCycle = opts.Profile.AcSamplesPerCycle > 0 ? opts.Profile.AcSamplesPerCycle : 20;
 
         var eps = opts.AdjustEpsilon > 0 ? opts.AdjustEpsilon : 1e-4;
         _ratioLo = System.Math.Exp(-eps);   // cold, construction-time only (never in the gate, §9)
@@ -129,6 +138,7 @@ public sealed partial class Netlist
         var cc = System.Math.Max(8, opts.ExpectedNodes);
         _cGen = new uint[cc]; _cAlive = new bool[cc]; _cKind = new byte[cc];
         _cA = new int[cc]; _cB = new int[cc]; _cC = new int[cc]; _cD = new int[cc]; _cValue = new double[cc];
+        _cStateVar = new double[cc]; _cStatePrev = new double[cc];
         _cKey = new ExternalKey[cc]; _cState = new StateKey[cc];
         _cDiode = new DiodeParams[cc]; _cSine = new SineDrive[cc]; _cIsSine = new bool[cc]; _cLimits = new LimitSpec[cc];
         _cInvalidSeq = new long[cc]; _cInvalidKind = new byte[cc];
@@ -205,14 +215,19 @@ public sealed partial class Netlist
         MarkComponentDirty(slot);
     }
 
-    /// <summary>0B; phase-continuous sine driver (document model; the subcycled
-    /// AC drive is phase 4, so this stage records the descriptor only).</summary>
+    /// <summary>0B; phase-continuous sine driver. Amplitude/frequency/phase-offset
+    /// update as a tier-1 write; the per-substep RHS evaluation reads them live and
+    /// the accumulated phase is NOT reset — a frequency change keeps phase continuous
+    /// (api.md §4; solver.md). Only the offset in a first Drive after construction can
+    /// shift phase; steady frequency retracking never does.</summary>
     [CostTier(1)]
     public void Drive(VSourceId id, in SineDrive d)
     {
         BeginTick();
         if (!ResolveComp(id.AsRef(), out var slot)) return;
-        _cSine[slot] = d; _cIsSine[slot] = true;
+        _cSine[slot] = d; _cIsSine[slot] = true; _cValue[slot] = d.AmplitudeV;
+        // Phase-continuous: _cStateVar (the accumulator) is deliberately left as-is so a
+        // frequency change carries the running phase. The next substep advances from it.
         MarkComponentDirty(slot);
     }
 
@@ -249,33 +264,37 @@ public sealed partial class Netlist
         MarkComponentDirty(slot);
     }
 
-    /// <summary>0B; capacitance. At DC a capacitor is open, so the document value
-    /// is recorded and the Backward-Euler companion follows in phase 4.</summary>
+    /// <summary>0B; capacitance. At DC a capacitor is open; in a transient island the
+    /// Backward-Euler companion conductance G = C/dt is restamped (tier 2, one refactor).</summary>
     [CostTier(2)]
     public void Adjust(CapacitorId id, double farads)
     {
         BeginTick();
         if (!ResolveComp(id.AsRef(), out var slot)) return;
         _cValue[slot] = farads;
+        PushStorageValue(slot);
     }
 
-    /// <summary>0B; inductance. At DC an inductor is a fixed ~1 mΩ short, so the
-    /// value only matters to the phase-4 transient companion; document-only here.</summary>
+    /// <summary>0B; inductance. At DC an inductor is a fixed ~1 mΩ short; in a transient
+    /// island the Backward-Euler companion conductance G = dt/L is restamped (tier 2).</summary>
     [CostTier(2)]
     public void Adjust(InductorId id, double henries)
     {
         BeginTick();
         if (!ResolveComp(id.AsRef(), out var slot)) return;
         _cValue[slot] = henries;
+        PushStorageValue(slot);
     }
 
-    /// <summary>0B; diode parameters (the Newton companion is phase 4).</summary>
+    /// <summary>0B; diode parameters. The Newton loop reads the new params on its next
+    /// relinearization; the island is dirtied so a settled DC island re-solves.</summary>
     [CostTier(2)]
     public void Adjust(DiodeId id, in DiodeParams p)
     {
         BeginTick();
         if (!ResolveComp(id.AsRef(), out var slot)) return;
         _cDiode[slot] = p;
+        MarkComponentDirty(slot);
     }
 
     /// <summary>0B; transformer turns ratio (coupled-row values change).</summary>
@@ -332,11 +351,12 @@ public sealed partial class Netlist
     /// the structural rebuild (generation reissue, island lifecycle) then a
     /// forced numeric solve of every live island — the energize / lesson-start
     /// path.</summary>
-    public void SolveOperatingPoint() => RunSolve(forceAll: true, dt: _profileDt);
+    public void SolveOperatingPoint() => RunSolve(operatingPoint: true, dt: _profileDt);
 
     /// <summary>One game tick: rebuilds/refactors/solves the dirty scheduling
-    /// units serially (small clients), publishing each island's solution.</summary>
-    public void Solve(in TickClock clock) => RunSolve(forceAll: false, dt: clock.Dt);
+    /// units serially (small clients), publishing each island's solution. Storage
+    /// islands integrate one Backward-Euler step (AC islands subcycle N substeps).</summary>
+    public void Solve(in TickClock clock) => RunSolve(operatingPoint: false, dt: clock.Dt);
 
     // ====================================================== identity resolution
 

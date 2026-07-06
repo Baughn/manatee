@@ -23,8 +23,16 @@ public readonly record struct TickClock(long TickIndex, double Dt)
 /// <summary>Phase-continuous sine drive descriptor (api.md §4).</summary>
 public readonly record struct SineDrive(double AmplitudeV, double FreqHz, double PhaseRad);
 
-/// <summary>Diode model parameters (api.md §23.4 — roles fixed, fields fill in
-/// at implementation). Values are placeholders for the phase-4 Newton stamp.</summary>
+/// <summary>Diode model parameters — the SPICE-conventional exponential junction
+/// (api.md §4/§23.4). The junction current is
+/// <c>I = Is·(exp(V/(n·Vt)) − 1)</c> with the thermal voltage <c>Vt = k·T/q</c>
+/// fixed at T = 300 K (≈ 0.025852 V; the model is isothermal — no self-heating).
+/// The Newton driver stamps a per-iteration linearized companion (Geq ‖ Ieq) with
+/// junction-voltage limiting (solver.md Analyses / Failure Handling).
+/// <para><b><see cref="SeriesResistance"/> is not yet stamped</b> (it would need a
+/// per-diode internal node; the phase-4 model is the ideal junction). The default
+/// is 0, so default diodes are exact; a nonzero Rs is currently ignored — a
+/// documented limitation, not silent for the default.</para></summary>
 public readonly record struct DiodeParams(double SaturationCurrent, double Emission, double SeriesResistance)
 {
     /// <summary>A silicon-ish default (Is=1e-14 A, n=1, Rs=0).</summary>

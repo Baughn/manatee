@@ -1,0 +1,11 @@
+﻿* manatee island 0
+V0 n0 0 DC 10
+R1 n0 n1 1000
+C2 n1 0 0.001 ic=0
+.options method=gear maxord=1 trtol=1e12
+.control
+set filetype=ascii
+tran 0.01 3 0 0.01 uic
+write output.raw
+.endc
+.end

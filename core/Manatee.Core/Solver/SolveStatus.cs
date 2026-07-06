@@ -22,6 +22,14 @@ internal enum SolveStatus : byte
     /// is ever published (api.md §20: "no NaN ever leaves the API"); the
     /// previous solution stays visible. Debug builds assert as well.</summary>
     NonFinite = 2,
+
+    /// <summary>A nonlinear (Newton) solve exhausted its iteration cap and the
+    /// fallback ladder without converging (solver.md Failure Handling; api.md §20
+    /// <see cref="FaultKind.NewtonDiverged"/>). Not produced by the linear
+    /// <see cref="Circuit"/> itself — the netlist's Newton driver raises it and
+    /// holds the previous published solution. No non-finite vector is ever left
+    /// behind: junction-voltage limiting keeps every iterate finite.</summary>
+    Diverged = 3,
 }
 
 /// <summary>

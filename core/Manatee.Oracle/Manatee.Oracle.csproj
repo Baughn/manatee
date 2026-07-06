@@ -7,4 +7,11 @@
     <RootNamespace>Manatee.Oracle</RootNamespace>
   </PropertyGroup>
 
+  <!-- The harness emits decks from a live Netlist (SpiceDeck.Emit) and reads
+       Solution/ReadCurrent back to diff against ngspice. Core grants Oracle
+       InternalsVisibleTo, so ReadCurrent(ComponentRef) is reachable. -->
+  <ItemGroup>
+    <ProjectReference Include="../Manatee.Core/Manatee.Core.csproj" />
+  </ItemGroup>
+
 </Project>

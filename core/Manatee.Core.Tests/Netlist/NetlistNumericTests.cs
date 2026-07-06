@@ -241,16 +241,27 @@ public sealed class NetlistNumericTests
     }
 
     [Fact]
-    public void Step_on_ac_island_throws_until_phase4()
+    public void Step_on_ac_island_runs_n_substeps()
     {
-        var net = new Core.Netlist(NetlistOptions.VintageStory());
+        // 5 Hz sine in a Mixed island at 20 samples/cycle, tick dt 0.05 s ⇒
+        // N = ceil(5·20·0.05) = 5 substeps per Step (solver-owned N; api.md §11).
+        var net = new Core.Netlist(new NetlistOptions
+        {
+            Profile = SolverProfile.Mixed(0.05),
+            Wiring = WiringPolicy.ExplicitOnly(),
+            Debug = DebugLevel.Asserts,
+        });
         NodeId a, g;
         using (var e = net.Edit())
         {
             a = e.AddNode(K(1)); g = e.AddReferenceNode(K(2));
             e.AddSineSource(a, g, new SineDrive(12.0, 5.0, 0.0), K(20), StateKey.From(K(20)));
+            e.AddResistor(a, g, 100.0, K(10));
         }
-        Assert.Throws<NotSupportedException>(() => net.Islands.Of(a).Step(new TickClock(0, 0.05)));
+        net.Islands.Of(a).Step(new TickClock(0, 0.05));
+
+        Assert.Equal(5, net.Islands.Of(a).Plan.Substeps);
+        Assert.Equal(5, net.LastTickStats.Substeps);
     }
 
     // ------------------------------------------------- Reconfigure-to-Solve story (§17)

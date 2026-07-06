@@ -43,7 +43,8 @@ public sealed partial class Netlist
         var cap = Math.Max(min, _cGen.Length * 2);
         Array.Resize(ref _cGen, cap); Array.Resize(ref _cAlive, cap); Array.Resize(ref _cKind, cap);
         Array.Resize(ref _cA, cap); Array.Resize(ref _cB, cap); Array.Resize(ref _cC, cap); Array.Resize(ref _cD, cap);
-        Array.Resize(ref _cValue, cap); Array.Resize(ref _cKey, cap); Array.Resize(ref _cState, cap);
+        Array.Resize(ref _cValue, cap); Array.Resize(ref _cStateVar, cap); Array.Resize(ref _cStatePrev, cap);
+        Array.Resize(ref _cKey, cap); Array.Resize(ref _cState, cap);
         Array.Resize(ref _cDiode, cap); Array.Resize(ref _cSine, cap); Array.Resize(ref _cIsSine, cap);
         Array.Resize(ref _cLimits, cap); Array.Resize(ref _cInvalidSeq, cap); Array.Resize(ref _cInvalidKind, cap);
         EnsureStampCap(cap);
@@ -117,6 +118,7 @@ public sealed partial class Netlist
         if (_iFree.Count > 0) { slot = _iFree.Pop(); }
         else { slot = _iSlotCount++; EnsureIslandCap(_iSlotCount); _iGen[slot] = FirstGen; }
         _iAlive[slot] = true; _iStatus[slot] = (byte)IslandStatus.Dirty; _iNeedsRebuild[slot] = false; _iNodeCount[slot] = 0;
+        _iSubstepN[slot] = 0; _iSubstepDt[slot] = 0.0; _iSubstepRawRef[slot] = 0.0;   // fresh subcycle plan
         _iAliveCount++; _idsDirty = true;
         return slot;
     }
@@ -242,6 +244,7 @@ public sealed partial class Netlist
         var slot = ReserveCompSlot();
         _cAlive[slot] = true; _cKind[slot] = (byte)kind; _cA[slot] = sa; _cB[slot] = sb; _cC[slot] = -1; _cD[slot] = -1;
         _cValue[slot] = value; _cKey[slot] = key; _cState[slot] = state; _cIsSine[slot] = false; _cLimits[slot] = limits;
+        _cStateVar[slot] = 0.0; _cStatePrev[slot] = 0.0;   // storage: cap V / inductor I start at 0 (uic; §14)
         e.AddedComponents.Add(slot);
         return slot;
     }
@@ -262,6 +265,11 @@ public sealed partial class Netlist
         var slot = ReserveCompSlot();
         _cAlive[slot] = true; _cKind[slot] = (byte)ComponentKind.VSource; _cA[slot] = sa; _cB[slot] = sb; _cC[slot] = -1; _cD[slot] = -1;
         _cValue[slot] = d.AmplitudeV; _cKey[slot] = key; _cState[slot] = state; _cIsSine[slot] = true; _cSine[slot] = d;
+        // Phase accumulator seeded at the drive's phase offset (normalized to [0, 2π)
+        // — sin-preserving), advanced ω·dt per substep and carried across ticks and N
+        // changes (phase-continuous, §4).
+        var ph0 = d.PhaseRad - TwoPi * Math.Floor(d.PhaseRad / TwoPi);
+        _cStateVar[slot] = ph0; _cStatePrev[slot] = ph0;
         e.AddedComponents.Add(slot);
         return slot;
     }
@@ -800,7 +808,24 @@ public sealed partial class Netlist
         return false;
     }
 
+    // Whether the island carries time-dependent content (a sine source or a
+    // capacitor/inductor) and so must re-solve every tick even when its document is
+    // untouched — the storage integrates / the sine advances (solver.md transient/AC).
+    private bool IslandIsTransient(int slot)
+    {
+        for (var c = 0; c < _cCount; c++)
+        {
+            if (!_cAlive[c] || _nIsland[_cA[c]] != slot) continue;
+            if (_cIsSine[c]) return true;
+            var kind = (ComponentKind)_cKind[c];
+            if (kind == ComponentKind.Capacitor || kind == ComponentKind.Inductor) return true;
+        }
+        return false;
+    }
+
     internal FaultDiagnostic IslandFault(int slot, uint gen) => IslandFaultNumeric(slot, gen);
+
+    internal SubstepPlan IslandPlan(int slot, uint gen) => IslandPlanNumeric(slot, gen);
 
     internal int DescribeFault(int slot, uint gen, Span<ComponentRef> comps, Span<NodeId> nodes)
         => DescribeFaultNumeric(slot, gen, comps, nodes);

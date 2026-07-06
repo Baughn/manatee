@@ -304,6 +304,11 @@ public readonly struct SolverProfile
     // Mixed: per-island regime chosen BY CONTENT — one Netlist hosts both DC and AC
     // islands; islands containing sine sources subcycle (N per island, quantized
     // with hysteresis per solver.md — never client-settable), pure-DC islands step once.
+    // A sine source in a NON-Mixed profile is legal but single-sampled per tick
+    // (no >=20-samples/cycle guarantee — deterministic and phase-wrapped, but
+    // heavily undersampled). Debug builds warn at Add time (ruled 2026-07-06:
+    // accepted user choice, warned footgun — same family as the floating-Return
+    // warning in §5).
 }
 
 // The per-client wiring surface. Three modes; fixed at Netlist birth.
@@ -671,7 +676,11 @@ public readonly struct IslandHandle
     public void Step(in TickClock clock);   // solve THIS island's scheduling unit; callable from ANY thread.
                                             // Single-writer-per-island, DEBUG-ASSERTED (not locked).
                                             // Step on a non-lead member of a coupled unit debug-asserts.
-    public SubstepPlan Plan { get; }        // read-only: N, substep dt, hysteresis band. Solver owns N.
+    public SubstepPlan Plan { get; }        // read-only: SubstepPlan(int Substeps, double SubstepDt,
+                                            // double HysteresisBand). Solver owns N: N = ceil(maxFreq ·
+                                            // acSamplesPerCycle · tickDt), re-decided only when the required
+                                            // rate drifts past ±HysteresisBand (0.15) of the value N was last
+                                            // chosen for; SubstepDt = tickDt / N. Band is 0 for DC / non-AC.
     public FaultDiagnostic Fault { get; }   // scalars; drain details via DescribeFault
     public int DescribeFault(Span<ComponentRef> comps, Span<NodeId> nodes);   // 0B; returns counts packed
 
@@ -1542,9 +1551,10 @@ Carried explicitly; none blocks implementation start.
    pinned, the default is tuned by benchmark/oracle before the tier-budget
    goldens are authored.
 4. **Parameter structs left as named sketches:** `TransformerParams`,
-   `EfficiencyCurve`, `I2tParams`, `DiodeParams`, `SubstepPlan` fields,
+   `EfficiencyCurve`, `I2tParams`, `DiodeParams`,
    `GraphOptions`, `SegmentKey`/`JunctionKey` layouts, `DebugLevel`. Roles
-   and homes are fixed; fields fill in at implementation.
+   and homes are fixed; fields fill in at implementation. (`SubstepPlan`
+   fields are now fixed — `Substeps` / `SubstepDt` / `HysteresisBand`, §11.)
 5. **Cross-platform FP:** bit-for-bit determinism is scoped to one
    `EnvFingerprint` (runtime/arch/build); CI runs the corpus on x64 and
    arm64 with tolerance diffing. Whether to forbid FMA-contractible patterns
@@ -1559,6 +1569,15 @@ Carried explicitly; none blocks implementation start.
    lacks the agreed additions (junction endpoints, gauge, device ports,
    fuse-in-adjacency) and `NetworkExportCommand.Execute` is a stub. The
    normalizer + export additions gate the 10k-segment intake benchmark.
+8a. **Floating nonlinear islands can converge to spurious operating points**
+   (found by the phase-4 oracle wave): a full-wave diode bridge grounded only
+   by gmin (possible under `ExplicitOnly` wiring) reached a Newton solution
+   violating an ideal V-source constraint by volts. `ReferenceBound`/
+   `TwoWireLeak` topologies carry real reference paths and are immune in
+   practice; the oracle test works around it with a physical bleeder.
+   Candidate fixes to evaluate: post-converge constraint-residual check ⇒
+   `Faulted`, or gmin ramping. Until then `CheckInvariants(Kcl)` after
+   suspect solves is the tablet-side mitigation.
 9. **stationeers.md follow-up revision needed** (found in adversarial review,
    fixed here in the walkthrough but not yet in that doc): its Integration
    Seams section maps manatee phases onto the per-network 3-phase contract,

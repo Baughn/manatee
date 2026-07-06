@@ -33,12 +33,19 @@ public sealed class NgspiceRunner
 
     /// <summary>Runs the netlist through ngspice and parses the result.</summary>
     public RawFile Run(string title, string netlist, params string[] analysisCommands)
+        => RunDeck(AssembleDeck(title, netlist, analysisCommands));
+
+    /// <summary>Runs a complete, self-contained deck (its own <c>.control</c> block
+    /// writing <c>output.raw</c>) through ngspice and parses the result. This is the
+    /// entry point for <c>SpiceDeck.Emit</c> output — the deck text is authored whole
+    /// by the emitter, not assembled here.</summary>
+    public RawFile RunDeck(string deck)
     {
         var workDir = Directory.CreateTempSubdirectory("manatee-oracle-").FullName;
         try
         {
             var deckPath = Path.Combine(workDir, "deck.cir");
-            File.WriteAllText(deckPath, AssembleDeck(title, netlist, analysisCommands));
+            File.WriteAllText(deckPath, deck);
 
             var psi = new ProcessStartInfo
             {

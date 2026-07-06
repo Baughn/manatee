@@ -529,6 +529,17 @@ internal sealed class Circuit
     /// raw MNA order (front buffer).</summary>
     internal ReadOnlySpan<double> PublishedVector => _solutionFront;
 
+    /// <summary>Copy the published (front) solution into <paramref name="dst"/>
+    /// (length ≥ <see cref="Dimension"/>). Zero-alloc. The Newton driver captures
+    /// the last-good vector before iterating so a diverged solve can hold it
+    /// (solver.md Failure Handling: "previous solution is held").</summary>
+    internal void CaptureSolution(double[] dst) => Array.Copy(_solutionFront, dst, _rowCount);
+
+    /// <summary>Restore a previously <see cref="CaptureSolution"/>-captured vector
+    /// as the published (front) solution. Zero-alloc. Used on a diverged Newton to
+    /// discard the non-converged iterate and re-expose the last-good solution.</summary>
+    internal void RestoreSolution(double[] src) => Array.Copy(src, _solutionFront, _rowCount);
+
     // ================================================================ internals
 
     private int Row(int node) => node < 0 ? -1 : _nodeRow[node];

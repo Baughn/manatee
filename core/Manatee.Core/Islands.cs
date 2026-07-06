@@ -135,8 +135,9 @@ public readonly struct IslandHandle
         _net.StepIsland(_slot, _gen, clock);
     }
 
-    /// <summary>AC subcycle plan (solver-owned N). DC islands report one step.</summary>
-    public SubstepPlan Plan => new(1, _net.ProfileDt, 0.0);
+    /// <summary>AC subcycle plan (solver-owned N): substep count, substep dt, and the
+    /// hysteresis band (api.md §11). DC / non-AC islands report a single step.</summary>
+    public SubstepPlan Plan => _net.IslandPlan(_slot, _gen);
 
     /// <summary>Scalar fault summary.</summary>
     public FaultDiagnostic Fault => _net.IslandFault(_slot, _gen);
