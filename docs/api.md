@@ -836,21 +836,24 @@ tap object and must live in setup, never in the tick loop (§22.b).
 
 ## 14. Snapshot, restore, serialization laws
 
-Per-island **snapshot** payload: capacitor voltages, inductor currents, device
-`Tick` state, source phase — keyed by `StateKey`, versioned binary (JSON debug
-form lives in `Manatee.Core.Diagnostics`, zero-cost in release). It does **not**
-carry the i²t thermal accumulators (fuses/cables are unkeyed resistors, outside
-the `StateKey` stream) nor boundary-coupler runtime (unit-owned, not island-
-owned): a per-island snapshot/restore resets those. The whole-netlist
-**`SaveCanonical`** memento (v2) is slot-preserving and DOES carry them — the
-per-component i²t melting integral + trip latch, the global ambient i²t
-threshold scale, and each coupler's persistent `CouplerRuntime` scalars
-(DC-link cap voltage, debt-droop integrators, relaxation smoothing, energy
-ledger) — so a save/load or command-log replay resumes a partway-melted fuse
-and a settled converter/transformer without a cold-start transient. Law 4
-below is scoped to circuits whose evolving state is `StateKey`-keyed; boundary
-couplers and i²t are covered by `SaveCanonical`, not by the per-island snapshot
-(see the open item in §22).
+Per-island **snapshot** payload (`SnapshotVersion` = 2), keyed by `StateKey`,
+versioned binary (JSON debug form lives in `Manatee.Core.Diagnostics`, zero-cost
+in release): capacitor voltages, inductor currents, device `Tick` state, source
+phase — **and, as of v2, the evolving state a per-island snapshot used to reset**:
+(a) each limits-bearing component's i²t melting integral + trip latch, keyed on
+the component's `ExternalKey`-derived `StateKey` (`StateKey.From(key)`), plus the
+global ambient i²t threshold scale; and (b) each boundary coupler's persistent
+`CouplerRuntime` scalars (DC-link cap voltage, debt-droop / energy-ledger /
+relaxation integrators), keyed on `StateKey.From(couplerKey)` and emitted by the
+coupler's **A-side island** (the documented anchor). These ride as raw kind bytes
+(6 = i²t, 7 = coupler-runtime) so the built-in `StateUnitKind` enum
+(`State/StateUnit.cs`) is untouched — a versioned-binary bump, not a wire contract.
+**Law 4 below therefore now extends** to converter/transformer-coupled islands and
+mid-melt fuses, not only `StateKey`-keyed RLC islands: solve → snapshot → restore →
+step is bit-for-bit for those too. The whole-netlist **`SaveCanonical`** memento
+(v2) remains the slot-preserving form that carries the same evolving state for a
+save/load or command-log replay, so a partway-melted fuse and a settled converter
+resume without a cold-start transient.
 
 ```csharp
 public readonly struct RestoreResult    // plain struct; orphans drained, not stored as spans
@@ -1019,7 +1022,7 @@ Binding rules:
 | component ids (`ResistorId`…`DiodeId`) | survives | survives | **survives** | **invalidated** at Solve; re-resolve `TryResolve(key)` | **invalidated** at Solve (**the removed one dies at commit**) | re-resolve by key | **invalidated**; re-resolve by key |
 | same handles, in an **unaffected island** | survives | survives | survives | survives | survives | survives | survives |
 | `CouplerId` | survives | survives | survives (subject of the op) | survives (subject of the op) | **survives** (document-level; only `RemoveCoupler` kills it) | re-resolve `TryResolveCoupler(key)` after `FromCanonical` | **survives** (resync never touches client-added couplers) |
-| `ProbeId` | survives | survives | survives | **survives**; reduction re-aims interpolation on the same handle | **survives**; re-aimed on the same handle | re-resolve `TryResolveProbe(key)` after `FromCanonical` | **invalidated** (resync re-creates reduction-owned probes); re-resolve `TryResolveProbe(key)` |
+| `ProbeId` | survives | survives | survives | **survives**; reduction re-aims interpolation on the same handle | **survives**; re-aimed on the same handle | re-resolve `TryResolveProbe(key)` after `FromCanonical` | **survives**; reduction re-aims interpolation on the same handle (only a whole-netlist `FromCanonical` reissues probe slots) |
 | `IslandId` | survives | survives | absorbed → **invalid**; survivor survives | each resulting island gets a **new** id; old **invalid** (`IslandRebuilt` per result) | **new** id; old **invalid** | islands re-derived on load | **invalidated** |
 | `ExternalKey` | survives | survives | survives | **survives** — the re-resolution key | **survives** | survives | **survives** — the diff/adopt key |
 | `StateKey` | survives | survives | survives | survives (state re-homed by key) | survives | **survives** — the restore match key | survives |
@@ -1169,12 +1172,29 @@ re-pin**: re-resolve every held device handle by `ExternalKey` (§11).
 
 Built-in models: `AdaptedLoad` (R18: G = P/V_prev² clamped, brownout with
 hysteresis + staggered rejoin + recloser lockout, across-tick energy-debt
-ledger), `AdaptedSource` (V source + internal series R + advertised-power
-across-tick current clamp), `Battery` (EMF + Rint + SoC integrator,
-per-chemistry parameters), `Alternator` (swing-lite rotor state →
-`Drive(SineDrive)`), `IdealizedTransformer` (same-matrix two-port built on
-`AddIdealTransformer` §6 plus ordinary leakage/magnetizing elements — *not*
-a coupler), `DecouplingTransformer`/`ConverterTwoPort` (couplers, §7).
+ledger — the ledger settlement is exact under a **fixed timestep**, the only mode
+the codebase drives), `AdaptedSource` (V source + internal series R +
+advertised-power across-tick current clamp; **stateless** — `StateSize=0`,
+registers no unit — its clamp reads the previous solution's load resistance and
+targets the exact EMF, converging in one step for resistive loads), `Battery`
+(EMF + Rint + SoC integrator, per-chemistry parameters), `Alternator` (swing-lite
+rotor state → `Drive(SineDrive)`), `IdealizedTransformer` (same-matrix two-port
+built on `AddIdealTransformer` §6 plus ordinary leakage/magnetizing elements —
+*not* a coupler), `DecouplingTransformer`/`ConverterTwoPort` (couplers, §7).
+
+**`DeviceHost`** is the built-in serial driver: `DeviceHost(Netlist)` builds
+devices over a public `Netlist` and drives them. `Add<T>(T device,
+ReadOnlySpan<NodeId> terminals, in ExternalKey baseKey, in StateKey state)` opens
+ONE `Edit` → `Build` → (when `StateSize>0`) `RegisterDeviceState` anchored on
+terminal 0, and enlists the device; `Tick(double dt)` ticks every enlisted device
+once in `Add` order through a tier-≤2 `DeviceTickContext`. It holds no internal
+handle (pure public-API consumer). **It does NOT implement the re-pin contract
+above** — a device caches its component AND terminal-node handles at `Build`, and
+`DeviceHost` cannot re-resolve the *caller-owned* terminal nodes from the device's
+own key — so it is complete only for STATIC-topology device islands (what the
+built-in models' tests exercise). After a co-island rebuild it keeps ticking
+through stale handles: a counted no-op (`StaleHandleReads`>0), never a crash. A
+dynamic-topology integration owns the re-pin loop itself (§22).
 
 ## 19. Reduction-layer intake contract
 

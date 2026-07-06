@@ -27,7 +27,25 @@ public sealed partial class Netlist
     // Snapshot container magic + version (bumped on any layout change; NOT stable
     // across versions — a versioned binary, not a wire contract).
     private const uint SnapshotMagic = 0x3153_544D;   // "MST1" little-endian
-    private const byte SnapshotVersion = 1;
+    // v2 (phase-6 law-4 carry): the per-island snapshot now ALSO rides the two
+    // evolving quantities that a per-island snapshot used to reset — the per-component
+    // i²t melting integral + trip latch (keyed on the component's ExternalKey-derived
+    // StateKey), and each boundary coupler's persistent CouplerRuntime scalars (keyed
+    // on StateKey.From(couplerKey), emitted by the coupler's A-SIDE island). Closing
+    // that carry is what lets law 4 (snapshot → restore → step, bit-for-bit) hold for a
+    // converter-coupled island and a mid-melt fuse, not just a StateKey-keyed RLC island.
+    private const byte SnapshotVersion = 2;
+
+    // Additional per-island state-unit kinds carried since v2 (raw bytes so StateUnit.cs
+    // stays untouched; the built-in kinds 1–5 live in the StateUnitKind enum).
+    private const byte I2tUnitKind = 6;       // per-component i²t: acc (double) + tripped (bool)
+    private const byte CouplerUnitKind = 7;   // boundary-coupler persistent runtime scalars
+    private const int I2tPayloadBytes = 8 + 1;
+    private const int CouplerRuntimeScalars = 14;
+    private const int CouplerPayloadBytes = CouplerRuntimeScalars * 8;
+
+    // Restore lookup for the i²t ride-along (StateKey → component slot), rebuilt per Restore.
+    private readonly Dictionary<StateKey, int> _islandI2tScratch = new();
     private const uint CanonicalMagic = 0x314E_434D;   // "MCN1"
     // v2: added evolved limit/coupler state to the memento — per-component i²t melting
     // integral + trip latch, the global i²t ambient threshold scale, and each boundary
@@ -106,6 +124,22 @@ public sealed partial class Netlist
         };
     }
 
+    // A component carries meaningful i²t state iff it has a thermal melt threshold —
+    // fuses/cables. The ride-along is keyed on its ExternalKey-derived StateKey
+    // (_cState[c] == StateKey.From(_cKey[c]) for a plain resistor), so a mid-melt fuse
+    // survives a per-island snapshot/restore (previously it silently un-heated; §14).
+    private bool IsI2tBearing(int slot) => _cAlive[slot] && _cLimits[slot].Thermal.MeltI2t > 0.0;
+
+    // A boundary coupler's persistent runtime rides in its A-SIDE island's snapshot
+    // (documented anchor choice, api.md §14): the A port loads island A, and the A-side
+    // is where the exchange's reflected current source lives, so anchoring there keeps
+    // the unit with the same island a galvanic merge/split of the A side would move it to.
+    // Emitted only when the runtime exists (post-first-solve) so size/count/emit agree.
+    private bool CouplerUnitInIsland(int k, int islandSlot)
+        => _kAlive[k] && !_kSpec[k].IsGalvanic
+           && k < _kRuntime.Length && _kRuntime[k] is not null
+           && _nIsland[_kAPos[k]] == islandSlot;
+
     // ======================================================= snapshot / restore
 
     internal int StateUnitCount(int islandSlot, uint gen)
@@ -113,12 +147,18 @@ public sealed partial class Netlist
         if (!IslandGenLive(islandSlot, gen)) return 0;
         var n = 0;
         for (var c = 0; c < _cCount; c++)
-            if (_cAlive[c] && _nIsland[_cA[c]] == islandSlot && IsStatefulComp(c)) n++;
+        {
+            if (!_cAlive[c] || _nIsland[_cA[c]] != islandSlot) continue;
+            if (IsStatefulComp(c)) n++;
+            if (IsI2tBearing(c)) n++;
+        }
         foreach (var key in _deviceStateOrder)
         {
             var e = _deviceStates[key];
             if (_nAlive[e.AnchorSlot] && _nIsland[e.AnchorSlot] == islandSlot) n++;
         }
+        for (var k = 0; k < _kCount; k++)
+            if (CouplerUnitInIsland(k, islandSlot)) n++;
         return n;
     }
 
@@ -127,14 +167,20 @@ public sealed partial class Netlist
         if (!IslandGenLive(islandSlot, gen)) return 0;
         var size = 4 + 1 + 4;   // magic + version + count
         for (var c = 0; c < _cCount; c++)
-            if (_cAlive[c] && _nIsland[_cA[c]] == islandSlot && IsStatefulComp(c))
-                size += 1 + 16 + BuiltinPayloadBytes;   // kind + StateKey + payload
+        {
+            if (!_cAlive[c] || _nIsland[_cA[c]] != islandSlot) continue;
+            if (IsStatefulComp(c)) size += 1 + 16 + BuiltinPayloadBytes;   // kind + StateKey + payload
+            if (IsI2tBearing(c)) size += 1 + 16 + I2tPayloadBytes;         // kind + StateKey + acc + tripped
+        }
         foreach (var key in _deviceStateOrder)
         {
             var e = _deviceStates[key];
             if (_nAlive[e.AnchorSlot] && _nIsland[e.AnchorSlot] == islandSlot)
                 size += 1 + 16 + 4 + e.Unit.BlobSize;   // kind + StateKey + blobLen + blob
         }
+        for (var k = 0; k < _kCount; k++)
+            if (CouplerUnitInIsland(k, islandSlot))
+                size += 1 + 16 + CouplerPayloadBytes;   // kind + StateKey + 14 scalars
         return size;
     }
 
@@ -151,11 +197,21 @@ public sealed partial class Netlist
 
         for (var c = 0; c < _cCount; c++)
         {
-            if (!_cAlive[c] || _nIsland[_cA[c]] != islandSlot || !IsStatefulComp(c)) continue;
-            w.Byte((byte)BuiltinKindOf(c));
-            w.StateKey(_cState[c]);
-            w.Double(_cStateVar[c]);
-            w.Double(_cStatePrev[c]);
+            if (!_cAlive[c] || _nIsland[_cA[c]] != islandSlot) continue;
+            if (IsStatefulComp(c))
+            {
+                w.Byte((byte)BuiltinKindOf(c));
+                w.StateKey(_cState[c]);
+                w.Double(_cStateVar[c]);
+                w.Double(_cStatePrev[c]);
+            }
+            if (IsI2tBearing(c))
+            {
+                w.Byte(I2tUnitKind);
+                w.StateKey(_cState[c]);
+                w.Double(c < _cI2t.Length ? _cI2t[c] : 0.0);
+                w.Bool(c < _cI2tTripped.Length && _cI2tTripped[c]);
+            }
         }
 
         foreach (var key in _deviceStateOrder)
@@ -171,6 +227,15 @@ public sealed partial class Netlist
             w.Bytes(buf);
         }
 
+        for (var k = 0; k < _kCount; k++)
+        {
+            if (!CouplerUnitInIsland(k, islandSlot)) continue;
+            var rt = _kRuntime[k]!;
+            w.Byte(CouplerUnitKind);
+            w.StateKey(StateKey.From(_kKey[k]));
+            WriteCouplerRuntimeScalars(ref w, rt);
+        }
+
         w.Flush();
     }
 
@@ -179,11 +244,15 @@ public sealed partial class Netlist
         if (!IslandGenLive(islandSlot, gen))
             throw new InvalidOperationException("Restore on a stale/dead island handle.");
 
-        // Build the island's live-unit lookup (StateKey → component slot). Cold.
+        // Build the island's live-unit lookups (StateKey → component slot). Cold.
         _islandUnitScratch.Clear();
+        _islandI2tScratch.Clear();
         for (var c = 0; c < _cCount; c++)
-            if (_cAlive[c] && _nIsland[_cA[c]] == islandSlot && IsStatefulComp(c))
-                _islandUnitScratch[_cState[c]] = c;
+        {
+            if (!_cAlive[c] || _nIsland[_cA[c]] != islandSlot) continue;
+            if (IsStatefulComp(c)) _islandUnitScratch[_cState[c]] = c;
+            if (IsI2tBearing(c)) _islandI2tScratch[_cState[c]] = c;
+        }
 
         var r = new SpanReader(blob);
         var magic = r.UInt32();
@@ -200,8 +269,37 @@ public sealed partial class Netlist
 
         for (var i = 0; i < count; i++)
         {
-            var kind = (StateUnitKind)r.Byte();
+            var kindByte = r.Byte();
             var key = r.StateKey();
+            if (kindByte == I2tUnitKind)
+            {
+                var acc = r.Double();
+                var tripped = r.Bool();
+                if (_islandI2tScratch.TryGetValue(key, out var slot))
+                {
+                    EnsureLimitCap(slot + 1);
+                    _cI2t[slot] = acc;
+                    _cI2tTripped[slot] = tripped;
+                    matched++;
+                    MarkIslandDirty(islandSlot);
+                }
+                else RecordOrphan(key);
+                continue;
+            }
+            if (kindByte == CouplerUnitKind)
+            {
+                if (TryFindCouplerForUnit(key, islandSlot, out var kSlot))
+                {
+                    var rt = _kRuntime[kSlot]!;
+                    ReadCouplerRuntimeScalars(ref r, rt);
+                    RepinCouplerStamps(kSlot, rt);
+                    matched++;
+                    MarkIslandDirty(islandSlot);
+                }
+                else { SkipCouplerRuntimeScalars(ref r); RecordOrphan(key); }
+                continue;
+            }
+            var kind = (StateUnitKind)kindByte;
             if (kind == StateUnitKind.Device)
             {
                 var len = r.Int32();
@@ -237,21 +335,76 @@ public sealed partial class Netlist
             }
         }
 
-        var live = _islandUnitScratch.Count + DeviceUnitsInIsland(islandSlot);
+        var live = StateUnitCount(islandSlot, gen);
         var untouched = live - matched;
         if (untouched < 0) untouched = 0;   // more matched than live only if blob double-keys; defensive
         return new RestoreResult(this, _restoreToken, matched, untouched, _restoreOrphanCount);
     }
 
-    private int DeviceUnitsInIsland(int islandSlot)
+    // ── boundary-coupler runtime ride-along (law-4 carry) ──
+
+    // Serialize ONLY the persistent, genuinely-evolving CouplerRuntime scalars — the DC-link
+    // cap's Backward-Euler history, the transformer debt-droop integrators, the relaxation
+    // smoothing anchors, the values active in the two circuits at the last exchange, and the
+    // energy ledger. The transient re-resolved fields (island slots, matrix stamps, local node
+    // indices, DcLinkG) are NOT serialized — they are rebuilt by StampBoundaryCouplers, or
+    // re-pushed from these scalars by RepinCouplerStamps on restore. Same 14 scalars the
+    // canonical v2 memento carries (Netlist.State WriteCouplerRuntime), minus its null flag.
+    private static void WriteCouplerRuntimeScalars(ref SpanWriter w, CouplerRuntime rt)
     {
-        var n = 0;
-        foreach (var key in _deviceStateOrder)
+        w.Double(rt.DcLinkVPrev);
+        w.Double(rt.DebtJ); w.Double(rt.DroopScale);
+        w.Double(rt.TputPeakJ); w.Double(rt.TputEmaJ); w.Double(rt.OverEmaJ);
+        w.Double(rt.VSmooth); w.Double(rt.ISmooth);
+        w.Double(rt.LastVB); w.Double(rt.LastIA); w.Double(rt.LastICharge);
+        w.Double(rt.InJ); w.Double(rt.OutJ); w.Double(rt.ModeledLossJ);
+    }
+
+    private static void ReadCouplerRuntimeScalars(ref SpanReader r, CouplerRuntime rt)
+    {
+        rt.DcLinkVPrev = r.Double();
+        rt.DebtJ = r.Double(); rt.DroopScale = r.Double();
+        rt.TputPeakJ = r.Double(); rt.TputEmaJ = r.Double(); rt.OverEmaJ = r.Double();
+        rt.VSmooth = r.Double(); rt.ISmooth = r.Double();
+        rt.LastVB = r.Double(); rt.LastIA = r.Double(); rt.LastICharge = r.Double();
+        rt.InJ = r.Double(); rt.OutJ = r.Double(); rt.ModeledLossJ = r.Double();
+    }
+
+    private static void SkipCouplerRuntimeScalars(ref SpanReader r)
+    {
+        for (var i = 0; i < CouplerRuntimeScalars; i++) r.Double();
+    }
+
+    // Resolve the coupler whose A-side island is islandSlot and whose StateKey.From(key)
+    // matches the blob entry (the anchor documented on CouplerUnitInIsland).
+    private bool TryFindCouplerForUnit(in StateKey key, int islandSlot, out int kSlot)
+    {
+        for (var k = 0; k < _kCount; k++)
+            if (CouplerUnitInIsland(k, islandSlot) && StateKey.From(_kKey[k]).Equals(key))
+            { kSlot = k; return true; }
+        kSlot = -1; return false;
+    }
+
+    // After restoring the runtime scalars, re-push the values ACTIVE at the snapshot instant
+    // into the live island circuits so the next solve is bit-for-bit with the never-snapshotted
+    // run — the injected A current source, the B feed-forward (transformer) or charge source +
+    // DC-link BE companion (converter). If a member island has no live runtime, the values are
+    // instead re-stamped from these same scalars by the next BuildRuntime/StampBoundaryCouplers.
+    private void RepinCouplerStamps(int k, CouplerRuntime rt)
+    {
+        var islA = rt.IslandA; var islB = rt.IslandB;
+        var rtA = (uint)islA < (uint)_iRuntime.Length ? _iRuntime[islA] : null;
+        var rtB = (uint)islB < (uint)_iRuntime.Length ? _iRuntime[islB] : null;
+        if (rtA is not null && rt.AStamped) rtA.Circuit.SetCurrentSource(rt.AStamp, rt.LastIA);
+        if (rtB is not null)
         {
-            var e = _deviceStates[key];
-            if (_nAlive[e.AnchorSlot] && _nIsland[e.AnchorSlot] == islandSlot) n++;
+            if (_kSpec[k].Kind == CouplerSpec.Family.ConverterTwoPort)
+            {
+                if (rt.BChargeStamped) rtB.Circuit.SetCurrentSource(rt.BChargeSource, rt.LastICharge);
+                if (rt.DcLinkStamped) rtB.Circuit.SetCompanionCurrent(rt.DcLink, rt.DcLinkG * rt.DcLinkVPrev);
+            }
+            else if (rt.BVStamped) rtB.Circuit.SetVSourceValue(rt.BVSource, rt.LastVB);
         }
-        return n;
     }
 
     private void RecordOrphan(in StateKey key)

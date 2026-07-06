@@ -7,8 +7,10 @@ namespace Manatee.Core;
 // is a document-stable observation point: a NODE probe reads one node; an
 // INTERPOLATED probe reads V = Va + t·(Vb − Va) between two nodes (the reduction
 // layer re-aims t via Meta.SetProbeInterpolation after a series collapse so an
-// instrument can read "inside" a compacted run). ProbeId survives rebuilds/merges;
-// after a resync/FromCanonical the client re-resolves via TryResolveProbe(key).
+// instrument can read "inside" a compacted run). ProbeId survives rebuilds/merges
+// AND a drift Resync (re-aimed on the same handle); only a whole-netlist
+// FromCanonical reissues probe slots, after which the client re-resolves via
+// TryResolveProbe(key).
 public sealed partial class Netlist
 {
     // Active oscilloscope taps (few; sampled after every substep). A List indexed
