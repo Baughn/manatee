@@ -26,7 +26,11 @@ to route observations and events back to geometry. Sparky's
    envelope**: the per-limit-type minimum over its constituents.
    Instantaneous ampacity, i²t thermal mass, and melting threshold can
    each pick a *different* segment in a mixed-material chain — which is
-   exactly the lead-fuse-in-a-copper-run case. Thresholds are
+   exactly the lead-fuse-in-a-copper-run case. **The i²t envelope is a
+   Pareto-minimal *set* of (rating, melt) pairs, not a single hybrid pair**
+   (ruled 2026-07-06 — a hybrid of X's rating and Y's melt trips when no
+   raw segment would; the shared series current makes per-pair accumulation
+   exactly raw-equivalent; see api.md §19). Thresholds are
    environment-adjusted per segment (ambient temperature; Stationeers
    spans −150 °C on Europa to +800 °C on Vulcan): an environment change
    dirties the envelope, a metadata-only recompute — never a matrix

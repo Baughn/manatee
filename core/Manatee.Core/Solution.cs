@@ -76,6 +76,17 @@ public readonly struct MetaFacade
     [CostTier(0)]
     public void SetLimits(ComponentRef c, in LimitSpec cfg) => _net.SetLimits(c, cfg);
 
+    /// <summary>Register/replace a component's thermal ENVELOPE — the Pareto-minimal
+    /// set of (rating, melt, tau) accumulators a collapsed series chain carries
+    /// (api.md §12/§19, ruled 2026-07-06). One melting integral runs per pair; the
+    /// component trips when any pair trips, and the event's <c>PairIndex</c> names it.
+    /// A registered envelope supersedes the LimitSpec's own <c>Thermal</c>; an empty
+    /// span clears it. Same-count re-registration (ambient re-derate) preserves the
+    /// accumulators by index; a count change resets them (api.md §19).</summary>
+    [CostTier(0)]
+    public void SetThermalEnvelope(ComponentRef c, System.ReadOnlySpan<I2tPair> pairs)
+        => _net.SetThermalEnvelopeImpl(c, pairs);
+
     /// <summary>0B; re-aim an interior interpolated probe.</summary>
     [CostTier(0)]
     public void SetProbeInterpolation(ProbeId p, NodeId a, NodeId b, double t)

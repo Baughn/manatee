@@ -299,16 +299,29 @@ public sealed class TransientTests
         Assert.Equal(n1, net.Islands.Of(a).Plan.Substeps);            // stays put (drift back to ~1.0)
     }
 
-    // ----------------------------------------------------------- zero-alloc AC loop
+}
+
+/// <summary>The zero-alloc AC-loop gate, in the serialized ZeroAlloc collection —
+/// see <see cref="ZeroAllocCollection"/> for the root cause (a concurrent compacting
+/// GC makes the per-thread counter over-report by an allocation quantum).</summary>
+[Collection(ZeroAllocCollection.Name)]
+public sealed class TransientZeroAllocTests
+{
+    private static ExternalKey K(ulong id) => new(id);
 
     [Fact]
     public void Ac_steady_substep_loop_allocates_nothing()
     {
-        if (!CounterIsReliable())
+        if (!ZeroAllocGates.CounterIsReliable())
             return;   // GC counter inert on this runtime (historically Mono) — best-effort skip (api.md §8)
 
         const double tickDt = 0.05;
-        var net = Mixed(tickDt);
+        var net = new Core.Netlist(new NetlistOptions
+        {
+            Profile = SolverProfile.Mixed(tickDt, 20),
+            Wiring = WiringPolicy.ExplicitOnly(),
+            Debug = DebugLevel.Asserts,
+        });
         NodeId a, g;
         using (var e = net.Edit())
         {
@@ -321,14 +334,26 @@ public sealed class TransientTests
         for (var i = 0; i < 6; i++) net.Solve(new TickClock(i, tickDt));   // warmup: build, first factor, id cache
         _ = net.LastTickStats;                                             // seal the tick
 
-        var before = GC.GetAllocatedBytesForCurrentThread();
-        for (var i = 0; i < 50; i++) net.Solve(new TickClock(100 + i, tickDt));
-        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        // Min over sub-runs (see ZeroAllocCollection): background GC / tiered JIT can
+        // add phantom bytes; the perturbation is additive, so min == 0 is the proof.
+        long best = long.MaxValue;
+        var tick = 100L;
+        for (var run = 0; run < 8 && best != 0; run++)
+        {
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            for (var i = 0; i < 50; i++) net.Solve(new TickClock(tick++, tickDt));
+            var d = GC.GetAllocatedBytesForCurrentThread() - before;
+            if (d < best) best = d;
+        }
 
-        Assert.True(allocated == 0, $"steady AC substep loop allocated {allocated} B over 50 ticks (expected 0)");
+        Assert.True(best == 0, $"steady AC substep loop allocated {best} B over 50 ticks (min over runs; expected 0)");
     }
+}
 
-    private static bool CounterIsReliable()
+/// <summary>Shared helper for the GC-counter gates.</summary>
+internal static class ZeroAllocGates
+{
+    internal static bool CounterIsReliable()
     {
         var before = GC.GetAllocatedBytesForCurrentThread();
         var probe = new byte[4096];

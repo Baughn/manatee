@@ -370,6 +370,23 @@ public sealed class NetlistNumericTests
         Assert.Equal(1, net.Islands.Count);
     }
 
+    private static ResistorId Resolve(Core.Netlist net, ExternalKey key)
+    {
+        Assert.True(net.TryResolve(key, out var c));
+        return new ResistorId(c.Slot, c.Gen, c.Net);
+    }
+}
+
+/// <summary>The guard-deferral test arms an <see cref="AllocationSentinel"/>, whose
+/// Debug.Assert reads the same per-thread GC counter as the zero-alloc gates — so it
+/// lives in the serialized ZeroAlloc collection (see <see cref="ZeroAllocCollection"/>:
+/// a concurrent compacting GC can charge this thread up to an allocation quantum of
+/// phantom bytes and fail the sentinel spuriously).</summary>
+[Collection(ZeroAllocCollection.Name)]
+public sealed class SteadyStateGuardZeroAllocTests
+{
+    private static ExternalKey K(ulong id) => new(id);
+
     // ---------------------------------------------------- guard defers Reconfigure
 
     [Fact]
@@ -407,11 +424,5 @@ public sealed class NetlistNumericTests
 
         net.SolveOperatingPoint();                   // the scheduled split rebuild lands
         Assert.Equal(2, net.Islands.Count);
-    }
-
-    private static ResistorId Resolve(Core.Netlist net, ExternalKey key)
-    {
-        Assert.True(net.TryResolve(key, out var c));
-        return new ResistorId(c.Slot, c.Gen, c.Net);
     }
 }

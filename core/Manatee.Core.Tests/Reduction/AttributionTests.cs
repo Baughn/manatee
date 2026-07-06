@@ -96,14 +96,16 @@ public sealed class AttributionTests
         // seg10: MaxCurrent 200, no thermal.   (copper backbone)
         // seg20 (X): MaxCurrent 10, no thermal. (thin — narrowest AMPACITY)
         // seg30 (Y): MaxCurrent 100, MeltI2t 50 A²·s, τ huge. (least THERMAL MASS)
-        // Envelope: MaxCurrent = min(200,10,100) = 10 (from X); MeltI2t = 50 (from Y).
-        // Force 20 A. Instantaneous: 20 > 10 ⇒ OverCurrent names X (seg20).
-        // i²t heating = (I² − rating²)·dt = (400 − 100)·0.5 = 150 A²·s per 0.5 s tick ⇒
-        // crosses 50 A²·s on the first tick ⇒ ThermalI2t names Y (seg30).
+        // Pareto-set ruling (api.md §19, 2026-07-06): Y's melting integral runs
+        // against Y's OWN 100 A rating — never against X's 10 A (the old hybrid pair,
+        // which tripped fires the raw graph never would). Force 120 A:
+        // instantaneous 120 > 10 ⇒ OverCurrent names X (seg20); Y heats at
+        // (120² − 100²)·0.5 = 2200 A²·s per 0.5 s tick ⇒ crosses 50 A²·s on the
+        // first tick ⇒ ThermalI2t names Y (seg30) — its own pair, its own segment.
         var backbone = new LimitSpec(200, 0, 0, default);
         var thin = new LimitSpec(10, 0, 0, default);
         var lowMass = new LimitSpec(100, 0, 0, new I2tParams(50, 1e9));
-        var rig = BuildChain(20.0, backbone, 0.01, thin, 0.01, lowMass, 0.01);
+        var rig = BuildChain(120.0, backbone, 0.01, thin, 0.01, lowMass, 0.01);
 
         for (var t = 1; t <= 2; t++) rig.Net.Solve(new TickClock(t, 0.5));   // integrate i²t
         var hits = DrainAttributed(rig);
@@ -113,6 +115,32 @@ public sealed class AttributionTests
         Assert.True(Find(hits, LimitKind.ThermalI2t, out var th));
         Assert.Equal(new SegmentKey(30), th.Segment);      // least thermal mass = Y
         Assert.NotEqual(oc.Segment, th.Segment);           // the whole point
+    }
+
+    [Fact]
+    public void Reduced_chain_does_not_trip_the_fictional_hybrid_pair()
+    {
+        // THE reviewer's repro (api.md §19 ruling, 2026-07-06): X = 10 A ampacity,
+        // NO melt; Y = 100 A, MeltI2t 50 A²·s. The retired hybrid envelope
+        // (rating = 10 from X, melt = 50 from Y) tripped ThermalI2t at 20 A on the
+        // first tick — an event the raw graph never emits (X never melts; Y is at
+        // a fifth of its rating). The Pareto set carries only Y's pair, so 20 A
+        // must over-current X every tick and NEVER melt anything.
+        var backbone = new LimitSpec(200, 0, 0, default);
+        var thin = new LimitSpec(10, 0, 0, default);                       // X: no melt
+        var lowMass = new LimitSpec(100, 0, 0, new I2tParams(50, 1e9));    // Y
+        var rig = BuildChain(20.0, backbone, 0.01, thin, 0.01, lowMass, 0.01);
+        Assert.Equal(1, rig.Graph.LiveChainCount);
+
+        for (var t = 1; t <= 40; t++)
+        {
+            rig.Net.Solve(new TickClock(t, 0.5));
+            var hits = DrainAttributed(rig);
+            Assert.True(Find(hits, LimitKind.OverCurrent, out var oc));   // X is over, every tick
+            Assert.Equal(new SegmentKey(20), oc.Segment);
+            Assert.False(Find(hits, LimitKind.ThermalI2t, out _),
+                $"fictional hybrid ThermalI2t fired at tick {t} — no raw segment melts at 20 A");
+        }
     }
 
     [Fact]

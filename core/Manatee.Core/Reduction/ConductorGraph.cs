@@ -76,7 +76,13 @@ public sealed partial class ConductorGraph
         public double TotalR;
         public JunctionKey P, Q;          // boundary region reps, P ≤ Q by key
         public bool Loop;                 // P == Q ⇒ shorted self-loop; not stamped
-        public LimitSpec Envelope;
+        public LimitSpec Envelope;        // instantaneous classes (exact minima); Thermal stays default
+        // Thermal envelope: the Pareto-minimal (rating, melt, tau) set over the
+        // constituents (api.md §19 ruling 2026-07-06) + the representative culprit
+        // segment per pair (min segment key among identical materials), ordered by
+        // that segment key so same membership ⇒ same pair indices across recomputes.
+        public I2tPair[] EnvPairs = Array.Empty<I2tPair>();
+        public SegmentKey[] EnvSegs = Array.Empty<SegmentKey>();
     }
 
     private List<Chain> _chains = new();
@@ -92,12 +98,23 @@ public sealed partial class ConductorGraph
 
     private readonly struct ChainSig
     {
-        public ChainSig(in JunctionKey p, in JunctionKey q, double r, in LimitSpec env)
-        { P = p; Q = q; R = r; Env = env; }
+        public ChainSig(in JunctionKey p, in JunctionKey q, double r, in LimitSpec env,
+                        I2tPair[] pairs, SegmentKey[] pairSegs)
+        { P = p; Q = q; R = r; Env = env; Pairs = pairs; PairSegs = pairSegs; }
         public readonly JunctionKey P, Q;
         public readonly double R;
         public readonly LimitSpec Env;
+        public readonly I2tPair[] Pairs;
+        public readonly SegmentKey[] PairSegs;
         public bool SameShape(in ChainSig o) => P.Equals(o.P) && Q.Equals(o.Q) && R == o.R;
+
+        public bool SameEnvelope(in ChainSig o)
+        {
+            if (!Env.Equals(o.Env) || Pairs.Length != o.Pairs.Length) return false;
+            for (var i = 0; i < Pairs.Length; i++)
+                if (!Pairs[i].Equals(o.Pairs[i]) || !PairSegs[i].Equals(o.PairSegs[i])) return false;
+            return true;
+        }
     }
 
     // ── Probes ──
@@ -351,6 +368,18 @@ public sealed partial class ConductorGraph
         if (!_slotToChain.TryGetValue(e.Source.Slot, out var ci)) { a = default; return false; }
         var chain = _chains[ci];
 
+        // ThermalI2t: the event names the tripping Pareto pair (api.md §12/§19
+        // ruling 2026-07-06) and the pair maps straight to its culprit segment —
+        // the accumulator IS that segment's melting integral, so no scan and no
+        // narrowest-threshold heuristic. Margin = observed integral ÷ its own
+        // effective melt threshold (the event carries both).
+        if (e.Kind == LimitKind.ThermalI2t && (uint)e.PairIndex < (uint)chain.EnvSegs.Length)
+        {
+            var m = e.Threshold > 0 ? e.Observed / e.Threshold : 0.0;
+            a = new AttributionResult(chain.EnvSegs[e.PairIndex], e.Kind, m);
+            return true;
+        }
+
         SegmentKey culprit = default;
         var found = false;
         var best = double.PositiveInfinity;
@@ -369,9 +398,11 @@ public sealed partial class ConductorGraph
                     crit = th;                                    // narrowest ampacity
                     break;
                 case LimitKind.ThermalI2t:
+                    // Fallback only (no envelope mapping — e.g. a stale event drained
+                    // across a resync): least effective thermal mass melts first.
                     if (!(s.Limits.Thermal.MeltI2t > 0)) continue;
                     th = s.Limits.Thermal.MeltI2t * DerateEnergy(s.AmbientK);
-                    crit = th;                                    // least thermal mass = melts first
+                    crit = th;
                     break;
                 case LimitKind.OverVoltage:
                     if (!(s.Limits.MaxVoltage > 0) || !(s.Ohms > 0)) continue;

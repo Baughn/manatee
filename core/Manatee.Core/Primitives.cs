@@ -148,6 +148,15 @@ public readonly struct EfficiencyCurve
 /// <summary>i²t slow-overload accumulator parameters (api.md §12).</summary>
 public readonly record struct I2tParams(double MeltI2t, double Tau);
 
+/// <summary>One (rating, melt) accumulator of a thermal ENVELOPE (api.md §12/§19,
+/// "i²t envelopes are Pareto sets" ruling 2026-07-06). A component carries 1..k of
+/// these via <c>Meta.SetThermalEnvelope</c>; the limit engine integrates one melting
+/// integral per pair (over <see cref="RatingAmps"/>: heat; under: cool with
+/// <see cref="Tau"/>) and trips when ANY pair crosses its <see cref="MeltI2t"/>.
+/// Plain <see cref="LimitSpec"/> clients never see this type (k=1 behavior is the
+/// spec's own <see cref="I2tParams"/> path — zero change).</summary>
+public readonly record struct I2tPair(double RatingAmps, double MeltI2t, double Tau);
+
 /// <summary>Per-component limit envelope (api.md §12). Same struct at Add-time
 /// and via <c>Meta.SetLimits</c>.</summary>
 public readonly record struct LimitSpec(double MaxCurrent, double MaxVoltage, double MaxPower, I2tParams Thermal);
@@ -156,13 +165,18 @@ public readonly record struct LimitSpec(double MaxCurrent, double MaxVoltage, do
 public enum LimitKind : byte { OverCurrent, OverVoltage, OverPower, ThermalI2t }
 
 /// <summary>A post-solve limit event, drained per island (api.md §12).
-/// Attribution to geometry is the reduction layer's job (§19).</summary>
+/// Attribution to geometry is the reduction layer's job (§19).
+/// <para><see cref="PairIndex"/>: for <see cref="LimitKind.ThermalI2t"/> on a
+/// component carrying a registered thermal envelope, the index of the tripping
+/// <see cref="I2tPair"/> (attribution maps pair → segment); 0 for the plain
+/// single-accumulator path and for all other kinds.</para></summary>
 public struct LimitEvent
 {
     public ComponentRef Source;
     public LimitKind Kind;
     public double Observed, Threshold, I2tFraction, SubstepTime;
     public long TickIndex;
+    public int PairIndex;
 }
 
 /// <summary>Boundary-coupler exchange instrumentation (api.md §7). Zeroed until

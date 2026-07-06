@@ -56,6 +56,10 @@ public sealed partial class Netlist
         int slot;
         if (_cFree.Count > 0) { slot = _cFree.Pop(); }
         else { slot = _cCount++; EnsureCompCap(_cCount); _cGen[slot] = FirstGen; }
+        // Evolved limit state is slot-parallel, not staged by the Add verbs: a slot
+        // reused from the free list would otherwise hand the NEW component the removed
+        // one's melting integral / trip latch / thermal envelope (phase-9 audit fix).
+        _cI2t[slot] = 0.0; _cI2tTripped[slot] = false; _cEnvCount[slot] = 0;
         return slot;
     }
 
@@ -65,6 +69,10 @@ public sealed partial class Netlist
         _cFree.Push(slot);
     }
 
+    // Coupler snapshot identity: the CLIENT-passed StateKey (api.md §14). Declared here
+    // (not in the Netlist.cs SoA block) alongside its staging/resize plumbing.
+    private StateKey[] _kState = new StateKey[4];
+
     private void EnsureCouplerCap(int min)
     {
         if (_kGen.Length >= min) return;
@@ -72,6 +80,7 @@ public sealed partial class Netlist
         Array.Resize(ref _kGen, cap); Array.Resize(ref _kAlive, cap); Array.Resize(ref _kSpec, cap);
         Array.Resize(ref _kStateA, cap); Array.Resize(ref _kAPos, cap); Array.Resize(ref _kANeg, cap);
         Array.Resize(ref _kBPos, cap); Array.Resize(ref _kBNeg, cap); Array.Resize(ref _kKey, cap);
+        Array.Resize(ref _kState, cap);
     }
 
     private int ReserveCouplerSlot()
@@ -307,9 +316,12 @@ public sealed partial class Netlist
     internal CouplerId StageAddCoupler(StructuralEdit e, in CouplerSpec spec, in CouplerPorts ports,
                                        in ExternalKey key, in StateKey state)
     {
-        _ = state;
         var slot = ReserveCouplerSlot();
         _kSpec[slot] = spec; _kKey[slot] = key;
+        // Coupler state units key on the CLIENT-passed StateKey (api.md §14) — a
+        // default(StateKey) falls back to the ExternalKey-derived identity so the
+        // snapshot stream never carries an all-zero key.
+        _kState[slot] = state == default ? StateKey.From(key) : state;
         _kStateA[slot] = spec.IsGalvanic ? CouplerState.Closed : CouplerState.Open;  // breaker default closed
         _kAPos[slot] = RequireNode(ports.APos); _kANeg[slot] = RequireNode(ports.ANeg);
         _kBPos[slot] = RequireNode(ports.BPos); _kBNeg[slot] = RequireNode(ports.BNeg);

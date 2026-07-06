@@ -31,21 +31,35 @@ public sealed partial class Netlist
     // evolving quantities that a per-island snapshot used to reset — the per-component
     // i²t melting integral + trip latch (keyed on the component's ExternalKey-derived
     // StateKey), and each boundary coupler's persistent CouplerRuntime scalars (keyed
-    // on StateKey.From(couplerKey), emitted by the coupler's A-SIDE island). Closing
-    // that carry is what lets law 4 (snapshot → restore → step, bit-for-bit) hold for a
-    // converter-coupled island and a mid-melt fuse, not just a StateKey-keyed RLC island.
-    private const byte SnapshotVersion = 2;
+    // on the coupler's CLIENT-passed StateKey — _kState — and emitted by the coupler's
+    // A-SIDE island). What the _kState keying kept identical is the PAYLOAD identity
+    // for the common client that passed StateKey.From(key); the container version
+    // still gates strictly (RestoreIsland rejects any version != SnapshotVersion), so
+    // pre-bump blobs are refused loudly, never read across versions. Should
+    // cross-version restore ever matter: v2 differs from v3 only by the absence of
+    // EnvI2tUnitKind records and could be accepted read-only. Closing the carry is
+    // what lets law 4 (snapshot → restore → step, bit-for-bit) hold for a
+    // converter-coupled island and a mid-melt fuse, not just a StateKey-keyed RLC
+    // island.
+    // v3 (phase-9 hardening): equivalent-resistor thermal envelopes (api.md §12/§19
+    // Pareto sets) ride as EnvI2tUnitKind — per-pair accumulators + trip latches,
+    // keyed on the component's StateKey.
+    private const byte SnapshotVersion = 3;
 
     // Additional per-island state-unit kinds carried since v2 (raw bytes so StateUnit.cs
     // stays untouched; the built-in kinds 1–5 live in the StateUnitKind enum).
     private const byte I2tUnitKind = 6;       // per-component i²t: acc (double) + tripped (bool)
     private const byte CouplerUnitKind = 7;   // boundary-coupler persistent runtime scalars
+    private const byte EnvI2tUnitKind = 8;    // v3: thermal-envelope per-pair acc + latch (§12/§19)
     private const int I2tPayloadBytes = 8 + 1;
     private const int CouplerRuntimeScalars = 14;
     private const int CouplerPayloadBytes = CouplerRuntimeScalars * 8;
+    private static int EnvPayloadBytes(int pairs) => 1 + pairs * (8 + 1);   // count byte + (acc, tripped) each
 
     // Restore lookup for the i²t ride-along (StateKey → component slot), rebuilt per Restore.
     private readonly Dictionary<StateKey, int> _islandI2tScratch = new();
+    // Restore lookup for the thermal-envelope ride-along (a component can carry both).
+    private readonly Dictionary<StateKey, int> _islandEnvScratch = new();
     private const uint CanonicalMagic = 0x314E_434D;   // "MCN1"
     // v2: added evolved limit/coupler state to the memento — per-component i²t melting
     // integral + trip latch, the global i²t ambient threshold scale, and each boundary
@@ -53,7 +67,11 @@ public sealed partial class Netlist
     // integrators, relaxation smoothing, energy ledger). Without these a SaveCanonical/
     // FromCanonical round-trip silently un-heats a partway fuse and cold-starts a settled
     // converter/transformer at V_B=0 (a startup transient the never-saved run lacks).
-    private const byte CanonicalVersion = 2;
+    // v3 (phase-9 hardening): (a) the coupler's CLIENT StateKey (_kState) — previously
+    // discarded at StageAddCoupler; (b) registered thermal ENVELOPES (§12/§19 Pareto
+    // sets): per-component pair count + (rating, melt, tau, acc, tripped) per pair, so
+    // a partway-melted REDUCED cable reloads partway-melted too.
+    private const byte CanonicalVersion = 3;
 
     // Built-in state-unit payload: stateVar + statePrev (two IEEE-754 doubles).
     private const int BuiltinPayloadBytes = 16;
@@ -130,6 +148,11 @@ public sealed partial class Netlist
     // survives a per-island snapshot/restore (previously it silently un-heated; §14).
     private bool IsI2tBearing(int slot) => _cAlive[slot] && _cLimits[slot].Thermal.MeltI2t > 0.0;
 
+    // Thermal-envelope ride-along (v3): per-pair melting integrals of a registered
+    // Pareto set (§12/§19). Restored additively by StateKey + matching pair count.
+    private bool IsEnvBearing(int slot)
+        => _cAlive[slot] && slot < _cEnvCount.Length && _cEnvCount[slot] > 0;
+
     // A boundary coupler's persistent runtime rides in its A-SIDE island's snapshot
     // (documented anchor choice, api.md §14): the A port loads island A, and the A-side
     // is where the exchange's reflected current source lives, so anchoring there keeps
@@ -151,6 +174,7 @@ public sealed partial class Netlist
             if (!_cAlive[c] || _nIsland[_cA[c]] != islandSlot) continue;
             if (IsStatefulComp(c)) n++;
             if (IsI2tBearing(c)) n++;
+            if (IsEnvBearing(c)) n++;
         }
         foreach (var key in _deviceStateOrder)
         {
@@ -171,6 +195,7 @@ public sealed partial class Netlist
             if (!_cAlive[c] || _nIsland[_cA[c]] != islandSlot) continue;
             if (IsStatefulComp(c)) size += 1 + 16 + BuiltinPayloadBytes;   // kind + StateKey + payload
             if (IsI2tBearing(c)) size += 1 + 16 + I2tPayloadBytes;         // kind + StateKey + acc + tripped
+            if (IsEnvBearing(c)) size += 1 + 16 + EnvPayloadBytes(_cEnvCount[c]);
         }
         foreach (var key in _deviceStateOrder)
         {
@@ -212,6 +237,14 @@ public sealed partial class Netlist
                 w.Double(c < _cI2t.Length ? _cI2t[c] : 0.0);
                 w.Bool(c < _cI2tTripped.Length && _cI2tTripped[c]);
             }
+            if (IsEnvBearing(c))
+            {
+                w.Byte(EnvI2tUnitKind);
+                w.StateKey(_cState[c]);
+                var cnt = _cEnvCount[c]; var st = _cEnvStart[c];
+                w.Byte((byte)cnt);
+                for (var p = 0; p < cnt; p++) { w.Double(_envAcc[st + p]); w.Bool(_envTripped[st + p]); }
+            }
         }
 
         foreach (var key in _deviceStateOrder)
@@ -232,7 +265,7 @@ public sealed partial class Netlist
             if (!CouplerUnitInIsland(k, islandSlot)) continue;
             var rt = _kRuntime[k]!;
             w.Byte(CouplerUnitKind);
-            w.StateKey(StateKey.From(_kKey[k]));
+            w.StateKey(_kState[k]);   // CLIENT key (api.md §14); == StateKey.From(_kKey[k]) unless the client chose otherwise
             WriteCouplerRuntimeScalars(ref w, rt);
         }
 
@@ -247,11 +280,13 @@ public sealed partial class Netlist
         // Build the island's live-unit lookups (StateKey → component slot). Cold.
         _islandUnitScratch.Clear();
         _islandI2tScratch.Clear();
+        _islandEnvScratch.Clear();
         for (var c = 0; c < _cCount; c++)
         {
             if (!_cAlive[c] || _nIsland[_cA[c]] != islandSlot) continue;
             if (IsStatefulComp(c)) _islandUnitScratch[_cState[c]] = c;
             if (IsI2tBearing(c)) _islandI2tScratch[_cState[c]] = c;
+            if (IsEnvBearing(c)) _islandEnvScratch[_cState[c]] = c;
         }
 
         var r = new SpanReader(blob);
@@ -284,6 +319,27 @@ public sealed partial class Netlist
                     MarkIslandDirty(islandSlot);
                 }
                 else RecordOrphan(key);
+                continue;
+            }
+            if (kindByte == EnvI2tUnitKind)
+            {
+                var cnt = r.Byte();
+                // Matched only when the live envelope has the SAME pair count — pair
+                // indices are positional (the reduction layer keeps membership order
+                // stable); a shape-changed envelope orphans the unit instead of
+                // scrambling integrals across pairs.
+                if (_islandEnvScratch.TryGetValue(key, out var envSlot) && _cEnvCount[envSlot] == cnt)
+                {
+                    var st = _cEnvStart[envSlot];
+                    for (var p = 0; p < cnt; p++) { _envAcc[st + p] = r.Double(); _envTripped[st + p] = r.Bool(); }
+                    matched++;
+                    MarkIslandDirty(islandSlot);
+                }
+                else
+                {
+                    for (var p = 0; p < cnt; p++) { r.Double(); r.Bool(); }
+                    RecordOrphan(key);
+                }
                 continue;
             }
             if (kindByte == CouplerUnitKind)
@@ -375,12 +431,12 @@ public sealed partial class Netlist
         for (var i = 0; i < CouplerRuntimeScalars; i++) r.Double();
     }
 
-    // Resolve the coupler whose A-side island is islandSlot and whose StateKey.From(key)
+    // Resolve the coupler whose A-side island is islandSlot and whose CLIENT StateKey
     // matches the blob entry (the anchor documented on CouplerUnitInIsland).
     private bool TryFindCouplerForUnit(in StateKey key, int islandSlot, out int kSlot)
     {
         for (var k = 0; k < _kCount; k++)
-            if (CouplerUnitInIsland(k, islandSlot) && StateKey.From(_kKey[k]).Equals(key))
+            if (CouplerUnitInIsland(k, islandSlot) && _kState[k].Equals(key))
             { kSlot = k; return true; }
         kSlot = -1; return false;
     }
@@ -468,6 +524,15 @@ public sealed partial class Netlist
             // latch (a partway-melted fuse must reload partway-melted, not cold).
             w.Double(i < _cI2t.Length ? _cI2t[i] : 0.0);
             w.Bool(i < _cI2tTripped.Length && _cI2tTripped[i]);
+            // v3: registered thermal envelope (pairs + evolved accumulators, §12/§19).
+            var envCnt = i < _cEnvCount.Length ? _cEnvCount[i] : 0;
+            w.Int32(envCnt);
+            for (var p = 0; p < envCnt; p++)
+            {
+                var st = _cEnvStart[i] + p;
+                w.Double(_envRating[st]); w.Double(_envMelt[st]); w.Double(_envTau[st]);
+                w.Double(_envAcc[st]); w.Bool(_envTripped[st]);
+            }
             w.Int64(_cInvalidSeq[i]); w.Byte(_cInvalidKind[i]);
         }
         WriteFreeStack(ref w, _cFree);
@@ -480,6 +545,7 @@ public sealed partial class Netlist
             WriteSpec(ref w, _kSpec[i]);
             w.Int32(_kAPos[i]); w.Int32(_kANeg[i]); w.Int32(_kBPos[i]); w.Int32(_kBNeg[i]);
             w.Key(_kKey[i]);
+            w.StateKey(_kState[i]);   // v3: the CLIENT snapshot identity (api.md §14)
             WriteCouplerRuntime(ref w, i < _kRuntime.Length ? _kRuntime[i] : null);
         }
         WriteFreeStack(ref w, _kFree);
@@ -634,6 +700,7 @@ public sealed partial class Netlist
         EnsureCompCap(Math.Max(8, _cCount));
         EnsureLimitCap(Math.Max(8, _cCount));   // size the i²t arrays before rehydrating them
         _cKeyMap.Clear();
+        _envUsed = 0;                            // envelope pool is rebuilt from the memento
         for (var i = 0; i < _cCount; i++)
         {
             _cGen[i] = r.UInt32(); _cAlive[i] = r.Bool(); _cKind[i] = r.Byte();
@@ -645,6 +712,20 @@ public sealed partial class Netlist
             _cIsSine[i] = r.Bool();
             _cLimits[i] = ReadLimit(ref r);
             _cI2t[i] = r.Double(); _cI2tTripped[i] = r.Bool();
+            // v3: thermal envelope (pairs + accumulators) into a fresh pool block.
+            var envCnt = r.Int32();
+            _cEnvCount[i] = envCnt; _cEnvCap[i] = envCnt; _cEnvStart[i] = _envUsed;
+            if (envCnt > 0)
+            {
+                _envUsed += envCnt;
+                EnsureEnvPoolCap(_envUsed);
+                for (var p = 0; p < envCnt; p++)
+                {
+                    var st = _cEnvStart[i] + p;
+                    _envRating[st] = r.Double(); _envMelt[st] = r.Double(); _envTau[st] = r.Double();
+                    _envAcc[st] = r.Double(); _envTripped[st] = r.Bool();
+                }
+            }
             _cInvalidSeq[i] = r.Int64(); _cInvalidKind[i] = r.Byte();
             _cStampKind[i] = 0;
             if (_cAlive[i]) _cKeyMap[_cKey[i]] = i;
@@ -662,6 +743,7 @@ public sealed partial class Netlist
             _kSpec[i] = ReadSpec(ref r);
             _kAPos[i] = r.Int32(); _kANeg[i] = r.Int32(); _kBPos[i] = r.Int32(); _kBNeg[i] = r.Int32();
             _kKey[i] = r.Key();
+            _kState[i] = r.StateKey();   // v3: CLIENT snapshot identity
             // Rehydrate the persistent coupler runtime scalars (DC-link history, debt
             // droop, ledger). The transient stamps/local-node fields stay at defaults —
             // StampBoundaryCouplers reuses this same runtime object (EnsureCouplerRuntime
@@ -706,7 +788,11 @@ public sealed partial class Netlist
     /// by their nodes' ExternalKeys (never slots), so two build paths that made
     /// the same logical circuit compare byte-equal — R11's drift detector stated
     /// as an equality. Slots, generations, free lists, island membership and
-    /// evolved dynamic state are all excluded (volatile / derived).</summary>
+    /// evolved dynamic state are all excluded (volatile / derived). Registered
+    /// thermal-envelope PAIRS are included — they are limit CONFIGURATION that
+    /// supersedes LimitSpec.Thermal (§12), so two builds differing only in
+    /// envelope must not compare equal; the evolved per-pair accumulators stay
+    /// excluded like every other dynamic quantity.</summary>
     internal void WriteNormalized(IBufferWriter<byte> dst)
     {
         var w = new SpanWriter(dst);
@@ -736,6 +822,17 @@ public sealed partial class Netlist
             w.Double(_cSine[i].AmplitudeV); w.Double(_cSine[i].FreqHz); w.Double(_cSine[i].PhaseRad);
             w.Bool(_cIsSine[i]);
             WriteLimit(ref w, _cLimits[i]);
+            // Thermal-envelope configuration (v3, folded into the canonical bump):
+            // pair count + (rating, melt, tau) per pair, in the deterministic
+            // culprit-segment-key order the reduction layer registers. Accumulators
+            // and trip latches are evolved state and stay out of the normalized form.
+            var envCnt = i < _cEnvCount.Length ? _cEnvCount[i] : 0;
+            w.Int32(envCnt);
+            for (var p = 0; p < envCnt; p++)
+            {
+                var st = _cEnvStart[i] + p;
+                w.Double(_envRating[st]); w.Double(_envMelt[st]); w.Double(_envTau[st]);
+            }
         }
 
         // Couplers sorted by key; ports by node key.
@@ -802,6 +899,17 @@ public sealed partial class Netlist
                 Mix((ulong)BitConverter.DoubleToInt64Bits(_cLimits[c].MaxCurrent));
                 Mix((ulong)BitConverter.DoubleToInt64Bits(_cLimits[c].MaxPower));
                 Mix(_cIsSine[c] ? 1UL : 0UL);
+                // Registered thermal envelope: configuration that supersedes
+                // LimitSpec.Thermal (§12) — envelope drift must move the Full hash.
+                var envCnt = c < _cEnvCount.Length ? _cEnvCount[c] : 0;
+                Mix((ulong)envCnt);
+                for (var p = 0; p < envCnt; p++)
+                {
+                    var st = _cEnvStart[c] + p;
+                    Mix((ulong)BitConverter.DoubleToInt64Bits(_envRating[st]));
+                    Mix((ulong)BitConverter.DoubleToInt64Bits(_envMelt[st]));
+                    Mix((ulong)BitConverter.DoubleToInt64Bits(_envTau[st]));
+                }
             }
         }
         return h;

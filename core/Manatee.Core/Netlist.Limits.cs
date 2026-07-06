@@ -28,6 +28,39 @@ public sealed partial class Netlist
     private double[] _cI2t = new double[8];      // melting-integral accumulator (A²·s)
     private bool[] _cI2tTripped = new bool[8];   // rising-edge latch for the ThermalI2t event
 
+    // ── Thermal ENVELOPES (api.md §12/§19 "i²t envelopes are Pareto sets", ruled
+    // 2026-07-06). A component may carry 1..k (rating, melt, tau) pairs registered via
+    // Meta.SetThermalEnvelope — flat SoA pool storage, one accumulator + trip latch per
+    // pair; the component trips when ANY pair trips, and the LimitEvent names the pair
+    // (PairIndex) so the reduction layer can attribute it to the culprit segment. A
+    // component with a registered envelope evaluates thermal limits from the envelope
+    // EXCLUSIVELY (its LimitSpec.Thermal is ignored); plain LimitSpec clients have
+    // _cEnvCount == 0 and keep the exact single-accumulator path — zero change.
+    //
+    // Pool discipline: blocks are bump-allocated; re-registration reuses the block in
+    // place when the new pair count fits its capacity (same count preserves the
+    // accumulators BY INDEX — an ambient re-derate keeps partial melt; a count change
+    // resets them, documented in api.md §19). Registration is cold/shape-time; the
+    // per-substep evaluation is pure flat-array arithmetic, 0 B.
+    //
+    // KNOWN, ACCEPTED GROWTH (adjudicated 2026-07-06): a re-registration that OUTGROWS
+    // its block strands the old range, a clear keeps the block tethered via _cEnvCap,
+    // and only FromCanonical repacks the pool (_envUsed = 0). Under long structural
+    // churn the five pool arrays therefore grow monotonically — bounded by
+    // (count-growing re-registrations) × k where k is small (distinct materials per
+    // chain) and registration is cold, so no tick loop touches this. Revisit with a
+    // capacity-bucketed free list or a compaction pass (trigger: _envUsed ≳ 2× live
+    // pair total) if profiling ever shows it; do NOT "fix" it on the hot path.
+    private int[] _cEnvStart = new int[8];       // offset into the flat pool (undefined when count == 0)
+    private int[] _cEnvCount = new int[8];       // live pair count; 0 = no envelope (plain spec path)
+    private int[] _cEnvCap = new int[8];         // block capacity at allocation (for in-place reuse)
+    private double[] _envRating = new double[8];
+    private double[] _envMelt = new double[8];
+    private double[] _envTau = new double[8];
+    private double[] _envAcc = new double[8];
+    private bool[] _envTripped = new bool[8];
+    private int _envUsed;
+
     // ── Per-island limit-event ring (island-slot indexed; buffers lazily allocated). ──
     private LimitEvent[]?[] _iLimitRing = new LimitEvent[4][];
     private int[] _iLimitHead = new int[4];      // next write index (mod capacity)
@@ -59,7 +92,57 @@ public sealed partial class Netlist
         if (_cI2t.Length >= min) return;
         var cap = Math.Max(min, _cI2t.Length * 2);
         Array.Resize(ref _cI2t, cap); Array.Resize(ref _cI2tTripped, cap);
+        Array.Resize(ref _cEnvStart, cap); Array.Resize(ref _cEnvCount, cap); Array.Resize(ref _cEnvCap, cap);
     }
+
+    private void EnsureEnvPoolCap(int min)
+    {
+        if (_envRating.Length >= min) return;
+        var cap = Math.Max(min, _envRating.Length * 2);
+        Array.Resize(ref _envRating, cap); Array.Resize(ref _envMelt, cap); Array.Resize(ref _envTau, cap);
+        Array.Resize(ref _envAcc, cap); Array.Resize(ref _envTripped, cap);
+    }
+
+    // Meta.SetThermalEnvelope seam (api.md §4/§12): register/replace a component's
+    // thermal envelope. Empty span clears it (back to the plain LimitSpec path).
+    // Same-count re-registration updates thresholds in place and PRESERVES the
+    // per-pair accumulators by index (an ambient re-derate keeps partial melt);
+    // a count change re-allocates and resets them (api.md §19). Cold tier-0 write.
+    internal void SetThermalEnvelopeImpl(in ComponentRef c, ReadOnlySpan<I2tPair> pairs)
+    {
+        if (!ResolveComp(c, out var slot)) return;
+        EnsureLimitCap(slot + 1);
+        if (pairs.Length == 0) { _cEnvCount[slot] = 0; return; }
+
+        var sameCount = _cEnvCount[slot] == pairs.Length;
+        int start;
+        if (_cEnvCap[slot] >= pairs.Length)
+        {
+            start = _cEnvStart[slot];              // reuse the block in place
+        }
+        else
+        {
+            start = _envUsed;                      // bump-allocate a fresh block
+            _envUsed += pairs.Length;
+            EnsureEnvPoolCap(_envUsed);
+            _cEnvStart[slot] = start;
+            _cEnvCap[slot] = pairs.Length;
+            sameCount = false;
+        }
+        for (var i = 0; i < pairs.Length; i++)
+        {
+            _envRating[start + i] = pairs[i].RatingAmps;
+            _envMelt[start + i] = pairs[i].MeltI2t;
+            _envTau[start + i] = pairs[i].Tau;
+            if (!sameCount) { _envAcc[start + i] = 0.0; _envTripped[start + i] = false; }
+        }
+        _cEnvCount[slot] = pairs.Length;
+    }
+
+    /// <summary>Number of live envelope pairs on a component (0 = plain spec path).
+    /// Test/diagnostic seam.</summary>
+    internal int ThermalEnvelopeCount(in ComponentRef c)
+        => ProbeComp(c, out var slot) ? _cEnvCount[slot] : 0;
 
     private void EnsureIslandLimitCap(int min)
     {
@@ -123,7 +206,8 @@ public sealed partial class Netlist
     private void EvaluateLimitComp(int islandSlot, int c, double dt, long tickIndex)
     {
             ref readonly var spec = ref _cLimits[c];
-            if (!HasLimits(spec)) return;
+            var envCount = c < _cEnvCount.Length ? _cEnvCount[c] : 0;
+            if (!HasLimits(spec) && envCount == 0) return;
 
             var current = BranchCurrent(c);
             var absI = current < 0.0 ? -current : current;
@@ -139,8 +223,41 @@ public sealed partial class Netlist
             if (spec.MaxPower > 0.0 && absP > spec.MaxPower)
                 RecordLimit(islandSlot, c, LimitKind.OverPower, absP, spec.MaxPower, 0.0, dt, tickIndex);
 
-            // i²t slow-overload accumulator (needs a current rating to be meaningful).
-            if (spec.Thermal.MeltI2t > 0.0 && spec.MaxCurrent > 0.0)
+            // i²t slow-overload accumulation. A registered thermal ENVELOPE (api.md
+            // §12/§19 Pareto-set ruling) evaluates one accumulator PER PAIR against
+            // that pair's OWN rating — exactly what the raw per-segment graph would do,
+            // since a series chain shares one current — and supersedes the spec's
+            // Thermal path entirely. Plain components keep the single accumulator.
+            if (envCount > 0)
+            {
+                var start = _cEnvStart[c];
+                for (var p = 0; p < envCount; p++)
+                {
+                    var rating = _envRating[start + p];
+                    var meltRaw = _envMelt[start + p];
+                    if (!(rating > 0.0) || !(meltRaw > 0.0)) continue;
+                    var acc = _envAcc[start + p];
+                    if (absI > rating) acc += (absI * absI - rating * rating) * dt;
+                    else
+                    {
+                        var tau = _envTau[start + p];
+                        if (tau > 0.0) { acc -= acc * (dt / tau); if (acc < 0.0) acc = 0.0; }
+                    }
+                    _envAcc[start + p] = acc;
+
+                    var melt = meltRaw * _i2tThresholdScale;
+                    if (acc >= melt)
+                    {
+                        if (!_envTripped[start + p])
+                        {
+                            _envTripped[start + p] = true;
+                            RecordLimit(islandSlot, c, LimitKind.ThermalI2t, acc, melt, acc / melt, dt, tickIndex, p);
+                        }
+                    }
+                    else if (acc < melt * 0.5) _envTripped[start + p] = false;   // hysteretic re-arm
+                }
+            }
+            else if (spec.Thermal.MeltI2t > 0.0 && spec.MaxCurrent > 0.0)
             {
                 var rating = spec.MaxCurrent;
                 var acc = _cI2t[c];
@@ -162,7 +279,8 @@ public sealed partial class Netlist
     }
 
     private void RecordLimit(int islandSlot, int compSlot, LimitKind kind,
-        double observed, double threshold, double i2tFraction, double substepTime, long tickIndex)
+        double observed, double threshold, double i2tFraction, double substepTime, long tickIndex,
+        int pairIndex = 0)
     {
         EnsureIslandLimitCap(_iSlotCount);
         var ring = _iLimitRing[islandSlot];
@@ -176,6 +294,7 @@ public sealed partial class Netlist
             Source = new ComponentRef((ComponentKind)_cKind[compSlot], compSlot, _cGen[compSlot], _netId),
             Kind = kind, Observed = observed, Threshold = threshold,
             I2tFraction = i2tFraction, SubstepTime = substepTime, TickIndex = tickIndex,
+            PairIndex = pairIndex,
         };
         _iLimitHead[islandSlot] = (idx + 1) % LimitRingCapacity;
         _iLimitCount[islandSlot]++;

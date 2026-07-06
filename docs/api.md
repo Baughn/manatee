@@ -252,6 +252,10 @@ public readonly struct MetaFacade
 {
     [CostTier(0)] public void SetLimits(ComponentRef c, in LimitSpec cfg);     // 0B; envelope/ambient recompute
                                                                                // (same LimitSpec as Add-time, §12)
+    [CostTier(0)] public void SetThermalEnvelope(ComponentRef c, ReadOnlySpan<I2tPair> pairs);
+                                                                               // register/replace the Pareto thermal
+                                                                               // SET (§12/§19); empty span clears;
+                                                                               // supersedes LimitSpec.Thermal
     [CostTier(0)] public void SetProbeInterpolation(ProbeId p, NodeId a, NodeId b, double t); // 0B; re-aim interior probe
     [CostTier(0)] public void SetDebugName(ComponentRef c, string name);       // debug builds only; may alloc
 }
@@ -780,13 +784,33 @@ instead of trusting the adaptor.
 
 ```csharp
 public readonly struct LimitSpec { public double MaxCurrent, MaxVoltage, MaxPower; public I2tParams Thermal; }
+public readonly record struct I2tPair(double RatingAmps, double MeltI2t, double Tau);  // one envelope accumulator (§19)
 public struct LimitEvent   // fixed size; attribution to geometry is the reduction layer's job (§19)
 {
     public ComponentRef Source; public LimitKind Kind;
     public double Observed, Threshold, I2tFraction, SubstepTime; public long TickIndex;  // replay-diffable
+    public int PairIndex;  // ThermalI2t on an envelope-carrying component: WHICH pair tripped (0 otherwise)
 }
 public enum LimitKind : byte { OverCurrent, OverVoltage, OverPower, ThermalI2t }
 ```
+
+**Thermal envelopes (Pareto sets, ruled 2026-07-06 — see §19).** A component
+may carry 1..k `(rating, melt, tau)` pairs registered via
+`Meta.SetThermalEnvelope` (flat SoA storage engine-side; k is small — bounded
+by distinct materials in the collapsed chain). The engine then integrates one
+melting accumulator PER PAIR against that pair's own rating — over it: heat
+`(I²−rating²)·dt`; under it: cool `acc·dt/τ` — and trips when ANY pair
+crosses its melt threshold; the event's `PairIndex` names the pair so §19
+attribution maps it to the culprit segment. A registered envelope
+**supersedes** the component's `LimitSpec.Thermal`; plain-`LimitSpec` clients
+never register one and keep the exact single-accumulator path (zero change —
+they are the k=1 case). Re-registering with the SAME pair count updates
+thresholds in place and preserves the accumulators by index (an ambient
+re-derate keeps partial melt, matching raw semantics where the integral
+belongs to the segment); a count change resets them. Envelope accumulators
+ride the per-island snapshot (an `EnvI2t` unit keyed on the component's
+`StateKey`) and the canonical memento, so a part-melted reduced cable
+reloads part-melted (§14).
 
 Drained per island into a caller span; fixed-cap ring, overflow counted, not
 grown (a melting base needn't emit every event — R9 degrades legibly). The
@@ -825,35 +849,48 @@ interpolator (t = cumulative-resistance fraction) and re-aims it via
 **document-stable across rebuilds and merges** (§16): the handle a client
 holds (the tablet's `scope`) stays valid; only the probe's *aim* — the
 interior interpolation targets — needs reduction-layer repair after a
-rebuild, on the same handle. A drift `Resync` tears down and re-creates
-reduction-owned probes, so after a resync (or `FromCanonical`) the client
-re-resolves via `TryResolveProbe(key)` — the key is minted deterministically
-(reduction probes: from `(SegmentKey, along)`), so the same key always names
-the same observation point. Sampling costs one struct store per substep, 0B,
+rebuild, on the same handle. A drift `Resync` KEEPS reduction-owned probes
+and re-aims them on their existing handles (as built — strictly stronger
+survival than a tear-down/re-create: `ProbeId`s outlive a resync). Only
+`FromCanonical` (which re-mints every handle) forces the client to
+re-resolve via `TryResolveProbe(key)`; reduction-minted probe keys come from
+a per-graph monotone counter — deterministic for a given `AddProbe` call
+order, but NOT derivable from `(SegmentKey, along)` — so clients hold the
+key (or the `ProbeId`) rather than re-deriving it. Sampling costs one struct store per substep, 0B,
 bounded by the two-probe contract (phase comparisons need a pair).
 `WaveformTap.Attach` is a **cold, call-once subscribe** — it allocates the
 tap object and must live in setup, never in the tick loop (§22.b).
 
 ## 14. Snapshot, restore, serialization laws
 
-Per-island **snapshot** payload (`SnapshotVersion` = 2), keyed by `StateKey`,
+Per-island **snapshot** payload (`SnapshotVersion` = 3), keyed by `StateKey`,
 versioned binary (JSON debug form lives in `Manatee.Core.Diagnostics`, zero-cost
 in release): capacitor voltages, inductor currents, device `Tick` state, source
-phase — **and, as of v2, the evolving state a per-island snapshot used to reset**:
+phase — **and the evolving state a per-island snapshot used to reset**:
 (a) each limits-bearing component's i²t melting integral + trip latch, keyed on
 the component's `ExternalKey`-derived `StateKey` (`StateKey.From(key)`), plus the
-global ambient i²t threshold scale; and (b) each boundary coupler's persistent
+global ambient i²t threshold scale (v2); (b) each boundary coupler's persistent
 `CouplerRuntime` scalars (DC-link cap voltage, debt-droop / energy-ledger /
-relaxation integrators), keyed on `StateKey.From(couplerKey)` and emitted by the
-coupler's **A-side island** (the documented anchor). These ride as raw kind bytes
-(6 = i²t, 7 = coupler-runtime) so the built-in `StateUnitKind` enum
-(`State/StateUnit.cs`) is untouched — a versioned-binary bump, not a wire contract.
-**Law 4 below therefore now extends** to converter/transformer-coupled islands and
-mid-melt fuses, not only `StateKey`-keyed RLC islands: solve → snapshot → restore →
-step is bit-for-bit for those too. The whole-netlist **`SaveCanonical`** memento
-(v2) remains the slot-preserving form that carries the same evolving state for a
-save/load or command-log replay, so a partway-melted fuse and a settled converter
-resume without a cold-start transient.
+relaxation integrators), keyed on the coupler's **client-passed `StateKey`** —
+`== StateKey.From(couplerKey)` unless the client chose otherwise — and emitted by
+the coupler's **A-side island** (the documented anchor) (v2); and (c) each
+registered thermal ENVELOPE's per-pair melting integrals + trip latches (§12/§19
+Pareto sets), keyed on the component's `StateKey`, matched positionally only when
+the live pair count agrees (v3) — so a part-melted REDUCED cable reloads
+part-melted. These ride as raw kind bytes (6 = i²t, 7 = coupler-runtime,
+8 = envelope-i²t) so the built-in `StateUnitKind` enum (`State/StateUnit.cs`) is
+untouched — a versioned-binary bump, not a wire contract; restore gates strictly
+on the version byte, so pre-bump blobs are rejected loudly, never misread. **Law
+4 below therefore extends** to converter/transformer-coupled islands, mid-melt
+fuses, and mid-melt reduced cables, not only `StateKey`-keyed RLC islands: solve
+→ snapshot → restore → step is bit-for-bit for those too. The whole-netlist
+**`SaveCanonical`** memento (v3) remains the slot-preserving form that carries
+the same evolving state — plus, as of v3, the coupler's client `StateKey`
+(previously discarded at build) and each component's envelope pairs +
+accumulators — so a partway-melted fuse and a settled converter resume without a
+cold-start transient. `SaveNormalized` includes envelope PAIRS (configuration —
+they supersede `LimitSpec.Thermal`, §12) but not accumulators, so R11's drift
+equality sees envelope drift while staying blind to evolved state, as intended.
 
 ```csharp
 public readonly struct RestoreResult    // plain struct; orphans drained, not stored as spans
@@ -1194,7 +1231,13 @@ above** — a device caches its component AND terminal-node handles at `Build`, 
 own key — so it is complete only for STATIC-topology device islands (what the
 built-in models' tests exercise). After a co-island rebuild it keeps ticking
 through stale handles: a counted no-op (`StaleHandleReads`>0), never a crash. A
-dynamic-topology integration owns the re-pin loop itself (§22).
+dynamic-topology integration owns the re-pin loop itself (§22), and its
+devices must be re-pinnable: wrap the load in a key-re-resolving adaptor
+(re-resolve component + terminal handles by `ExternalKey` after each rebuild
+— the §22.a `RevoltAdaptor` pattern) rather than a built-in model whose
+handles are private. Open item: give `AdaptedLoad` (and siblings) a public
+re-resolve-by-key surface if graph-attached built-ins on churning islands
+are ever wanted (§23).
 
 ## 19. Reduction-layer intake contract
 
@@ -1212,7 +1255,12 @@ public sealed class ConductorGraph
                                                                    // islands sit Building
     public void AddSegment(in SegmentKey k, in JunctionKey a, in JunctionKey b, in ConductorSpec spec,
                            PartitionKey partition = default);
-                                                                   // incremental; merge pre-check → fast path vs rebuild.
+                                                                   // eager: recompacts the shadow, then DIFFS the result
+                                                                   // against the realized netlist so unchanged nodes/chains
+                                                                   // emit NO edits (handles survive; a redundant pass is a
+                                                                   // no-op). Cost today is O(graph) per non-bulk edit — the
+                                                                   // localized fast path is scheduled perf work against the
+                                                                   // 10k-segment benchmark, not a semantic difference.
                                                                    // ClientPartitioned: `partition` is MANDATORY (default
                                                                    // throws at add time) — every junction the segment
                                                                    // touches is partition-tagged, a junction claimed by
@@ -1265,6 +1313,52 @@ Reduction is *semantically invisible*: raw and collapsed graphs produce
 identical terminal behavior, and probes agree with the raw interior — both
 standing equivalence tests (testing-strategy.md), now expressible as
 `SaveNormalized` equalities (§14).
+
+**i²t envelopes are Pareto *sets*, not hybrid pairs (ruled 2026-07-06).**
+The phase-7 review proved the single-pair envelope (rating = min ampacity
+from segment X, melt threshold = min from segment Y) fires trips the raw
+graph never would — a fictional hybrid component, violating both semantic
+invisibility and the hazards-trace-to-player-mistakes rule (a false-positive
+fire indicts nobody). Resolution: a series chain carries one shared current,
+so per-segment i²t accumulation is *exactly* raw behavior. The collapsed
+element's thermal envelope is therefore the **Pareto-minimal set of
+(rating, meltI2t) pairs** over its constituents (pair s is dominated when
+another pair trips no later at every current: rating ≤ and melt ≤); the
+limit engine accumulates one integral per surviving pair and trips when any
+pair trips; attribution names the tripping pair's segment. The set is
+bounded by the chain's distinct materials in practice, and **limit-event
+equivalence raw-vs-reduced becomes a standing test** (it was previously
+unstatable). Instantaneous classes keep the plain minimum — they were
+always exact.
+
+*Implementation contract (built 2026-07-06).* Dominance includes the
+cooling constant: pair *d* retires pair *s* only when `rating_d ≤ rating_s`
+AND `melt_d ≤ melt_s` AND *d* cools no faster than *s* — a slower-cooling
+pair can out-trip a nominally weaker one under pulsed load, so tau
+participates in the frontier. Tau compares by the ENGINE's cooling
+semantics, not numerically: `tau ≤ 0` means the accumulator never cools
+(§12), i.e. the SLOWEST cooling, ranked as +∞ — ranking it as the numeric
+minimum let a cooling fuse retire a never-cooling segment that out-ratchets
+it under pulsed load (a raw melt the reduced side would never report; the
+tau≤0 regression test pins this). Identical `(rating, melt, tau)` triples collapse to one pair
+whose culprit is the min segment key; the surviving pairs order by culprit
+segment key, so unchanged membership keeps stable pair indices across
+recomputes. The reduction layer registers the set through
+`Meta.SetThermalEnvelope` (the equivalent's own `LimitSpec.Thermal` stays
+default — the envelope supersedes it, §12); an ambient re-derate with
+unchanged membership re-registers in place and PRESERVES the per-pair
+melting integrals; a membership change clears first (integrals reset — a
+topology-grade envelope change, not a tier-0 re-derate). `Attribute` routes
+a `ThermalI2t` event by its `PairIndex` straight to the pair's segment — no
+narrowest-threshold scan, no hybrid margin. The standing equivalence test
+(LimitEventEquivalenceTests) drives raw and reduced builds of seeded
+mixed-material chains through one current script and asserts: no fiction
+(every reduced thermal event is a raw event — same tick, segment,
+threshold), no delay (first-trip ticks equal; the frontier always contains
+the earliest-tripping raw segment), and OverCurrent parity. Post-first-trip
+streams are NOT compared: the client acts on the first trip, and a
+dominated segment's later raw trip is exactly what the Pareto pruning
+declares unobservable before then.
 
 Intake per client: VS voxels → greedy-meshed prisms → union-find regions
 (three block representations, one intake — vintage-story.md); Stationeers
@@ -1433,6 +1527,14 @@ using (var build = graph.BeginBulkBuild(expectedSegments: norm.Cables.Count))
 
 using (var e = net.Edit())
 {
+    // DEVICE-POPULATION CAVEAT (verified by the executable fake, Tests/Clients):
+    // the BUILT-IN AdaptedLoad caches its component AND terminal handles privately
+    // at Build and exposes no re-pin surface (§18), so it is only safe on islands
+    // whose topology never churns. A load attached to a graph tap on a network that
+    // suffers cuts/breaker trips must instead be a KEY-RE-RESOLVING adaptor
+    // (stationeers.md "legacy-device adaptor"; the fake's RevoltAdaptor) that
+    // re-pins by ExternalKey per §16 in the re-pin phases below. `_adapted` here
+    // stands for that adaptor population.
     foreach (var d in norm.Devices)                             // ~100 adapted constant-power devices
         _adaptedByNet[d.NetworkRefId].Add(AdaptedLoad.Create(e, graph.PortNode(J(d.Port)),
                      graph.ReferenceNode(new PartitionKey(d.NetworkRefId)),   // negative = reference rail
@@ -1492,6 +1594,18 @@ void GlobalPowerTick()                                          // once per 0.5 
         for (int i = 0; i < _adapted.Count; i++) _adapted[i].Tick(in ctx);  // ~100 × Adjust, ε-no-ops once converged
     }
     net.Solve(_clock.Next(0.5));                                // ONE solve for all 7 islands
+
+    // 4. CHURN-TICK RE-PIN (binding; adjudicated 2026-07-06). Island rebuilds run
+    // INSIDE Solve (§16/§17) and reissue every member component/node handle, so on
+    // any tick that mutated topology or drained changes, the phase-2 re-pin above is
+    // NOT sufficient: the handles it resolved were just reissued by this Solve.
+    // Re-resolve the churned adaptors by key AGAIN — here, before any ApplyState_New
+    // reads the Solution — or the readback dereferences exactly the handles this
+    // tick invalidated (a counted no-op: StaleHandleReads > 0, and the post-tick
+    // assert below fires). The executable fake proves both directions: with this
+    // re-pin the whole scripted run holds StaleHandleReads == 0; without it, a cut
+    // tick trips the counter (FakeRevoltClientTests).
+    if (topologyChanged || changesDrained) _adapted.Repin(net, graph);
 }
 void ApplyState_New(CableNetwork network)                       // per network, inside its OnPowerTick phases
 {

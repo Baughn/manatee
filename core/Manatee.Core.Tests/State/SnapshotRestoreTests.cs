@@ -188,6 +188,66 @@ public sealed class SnapshotRestoreTests
         Assert.Equal(6.75, dev.Charge, 12);
     }
 
+    // ── Coupler snapshot identity: the CLIENT StateKey (api.md §14; phase-9 fix —
+    //    StageAddCoupler used to discard it and key on StateKey.From(externalKey)) ──
+
+    private static Core.Netlist ConverterRig(ulong couplerKey, in StateKey state, out NodeId aPos, out CouplerId c)
+    {
+        var net = Mixed(0.05);
+        var eff = EfficiencyCurve.Points((0.25, 0.80), (0.5, 0.90), (1.0, 0.95));
+        using (var e = net.Edit())
+        {
+            aPos = e.AddNode(K(1)); var gnd = e.AddReferenceNode(K(2));
+            var bPos = e.AddNode(K(3)); var bGnd = e.AddReferenceNode(K(4));
+            e.AddVoltageSource(aPos, gnd, 100.0, K(10));
+            e.AddResistor(bPos, bGnd, 5.0, K(11));
+            c = e.AddCoupler(CouplerSpec.ConverterTwoPort(eff, 0.01, 50.0, 1000.0),
+                new CouplerPorts(aPos, gnd, bPos, bGnd), K(couplerKey), state);
+        }
+        net.SolveOperatingPoint();
+        net.Reconfigure(c, CouplerState.Closed);
+        return net;
+    }
+
+    [Fact]
+    public void Coupler_state_unit_keys_on_the_client_StateKey_not_the_external_key()
+    {
+        // Source rig: coupler ExternalKey K(30), CLIENT StateKey S(777). Settle, snapshot.
+        var clientKey = new StateKey(777);
+        var src = ConverterRig(30, clientKey, out var aPosSrc, out _);
+        for (var i = 0; i < 200; i++) src.Solve(new TickClock(1 + i, 0.05));
+        var blob = Snapshot(src.Islands.Of(aPosSrc));
+
+        // Target rig: DIFFERENT ExternalKey K(31), SAME client StateKey S(777). The
+        // coupler runtime unit must MATCH by the client key — under the old
+        // StateKey.From(externalKey) keying it would orphan.
+        var dst = ConverterRig(31, clientKey, out var aPosDst, out var cDst);
+        dst.Solve(new TickClock(1, 0.05));
+        var res = dst.Islands.Of(aPosDst).Restore(blob);
+        Assert.True(res.Matched >= 1, "the coupler unit must restore by CLIENT StateKey");
+        Assert.Equal(0, res.OrphansInBlob);
+
+        // And the restored DC-link/droop state is live: the ledger resumes from the
+        // snapshotted totals rather than zero.
+        var led = dst.Islands.Of(aPosDst).Ledger(cDst);
+        Assert.True(led.InJ > 0.0, "restored coupler ledger should carry the snapshotted energy history");
+    }
+
+    [Fact]
+    public void Coupler_state_unit_with_mismatched_client_key_orphans()
+    {
+        var src = ConverterRig(30, new StateKey(777), out var aPosSrc, out _);
+        for (var i = 0; i < 50; i++) src.Solve(new TickClock(1 + i, 0.05));
+        var blob = Snapshot(src.Islands.Of(aPosSrc));
+
+        var dst = ConverterRig(30, new StateKey(888), out var aPosDst, out _);   // same ExternalKey!
+        dst.Solve(new TickClock(1, 0.05));
+        var res = dst.Islands.Of(aPosDst).Restore(blob);
+        // Identity is the CLIENT key: the same ExternalKey no longer matches it.
+        Assert.Equal(0, res.Matched);
+        Assert.True(res.OrphansInBlob >= 1);
+    }
+
     // ── Law 4: solve → snapshot → restore → step is bit-for-bit on RawVector ──
 
     [Fact]

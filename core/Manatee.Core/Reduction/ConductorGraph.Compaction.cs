@@ -252,10 +252,15 @@ public sealed partial class ConductorGraph
         return chain;
     }
 
+    // Instantaneous envelope classes are exact minima over constituents (they were
+    // always exact — api.md §19). The THERMAL envelope is NOT a hybrid single pair:
+    // it is the Pareto-minimal SET of per-segment (derated rating, derated melt, tau)
+    // accumulators (ruled 2026-07-06 — a hybrid of X's rating and Y's melt trips when
+    // no raw segment would). The chain's LimitSpec.Thermal therefore stays default;
+    // the set rides EnvPairs/EnvSegs and is registered via Meta.SetThermalEnvelope.
     private LimitSpec ComputeEnvelope(Chain chain)
     {
         var maxI = double.PositiveInfinity; var hasI = false;
-        var meltMin = double.PositiveInfinity; double tauSel = 0; var hasMelt = false;
         var critV = double.PositiveInfinity; var hasV = false;
         var critP = double.PositiveInfinity; var hasP = false;
 
@@ -267,12 +272,6 @@ public sealed partial class ConductorGraph
                 var eff = s.Limits.MaxCurrent * DerateCurrent(s.AmbientK);
                 if (eff < maxI) maxI = eff;
                 hasI = true;
-            }
-            if (s.Limits.Thermal.MeltI2t > 0)
-            {
-                var em = s.Limits.Thermal.MeltI2t * DerateEnergy(s.AmbientK);
-                if (em < meltMin) { meltMin = em; tauSel = s.Limits.Thermal.Tau; }
-                hasMelt = true;
             }
             if (s.Limits.MaxVoltage > 0 && s.Ohms > 0)
             {
@@ -288,18 +287,134 @@ public sealed partial class ConductorGraph
             }
         }
 
+        ComputeThermalEnvelope(chain);
+
         return new LimitSpec(
             hasI ? maxI : 0.0,
             hasV ? chain.TotalR * critV : 0.0,
             hasP ? chain.TotalR * critP : 0.0,
-            new I2tParams(hasMelt ? meltMin : 0.0, hasMelt ? tauSel : 0.0));
+            default);
     }
+
+    // Build the Pareto-minimal thermal set. A pair contributes only when its segment
+    // carries BOTH a rating and a melt threshold (the raw engine's own gate — i²t
+    // needs a rating to integrate against). Dominance: d retires s when d trips no
+    // later at every current and cools no faster — rating_d ≤ rating_s AND
+    // melt_d ≤ melt_s AND d cools no faster than s (tau participates: a
+    // slower-cooling pair can out-trip under pulsed load even with a higher melt).
+    // Cooling compares by the ENGINE's semantics (Netlist.Limits: cooling applies
+    // only when tau > 0), so tau ≤ 0 means NEVER COOLS — the slowest cooling,
+    // compared as +∞, not the numeric minimum. (Ranking tau=0 numerically let a
+    // cooling fuse retire a never-cooling segment that out-ratchets it under pulsed
+    // load — a raw melt the reduced side would never report; the tau≤0 regression
+    // test pins this.) Identical materials collapse to one pair; its culprit is the
+    // min segment key. Surviving pairs are ordered by culprit segment key, so
+    // unchanged membership keeps stable pair indices (the engine preserves
+    // accumulators by index on same-count re-register). Membership-unchanged
+    // recomputes rewrite the chain's existing arrays IN PLACE — the SetAmbient
+    // re-derate path is tier-0 (api.md §19) and must not allocate.
+    private void ComputeThermalEnvelope(Chain chain)
+    {
+        _envScratch.Clear();
+        foreach (var sk in chain.Segments)
+        {
+            var s = _segs[sk];
+            if (!(s.Limits.MaxCurrent > 0) || !(s.Limits.Thermal.MeltI2t > 0)) continue;
+            var pair = new I2tPair(
+                s.Limits.MaxCurrent * DerateCurrent(s.AmbientK),
+                s.Limits.Thermal.MeltI2t * DerateEnergy(s.AmbientK),
+                s.Limits.Thermal.Tau);
+            // Identical material already collected ⇒ keep the min-key culprit.
+            var merged = false;
+            for (var i = 0; i < _envScratch.Count; i++)
+            {
+                if (!_envScratch[i].pair.Equals(pair)) continue;
+                if (CompareSeg(sk, _envScratch[i].seg) < 0) _envScratch[i] = (pair, sk);
+                merged = true;
+                break;
+            }
+            if (!merged) _envScratch.Add((pair, sk));
+        }
+
+        // Pareto prune (n is small: distinct materials in one chain).
+        for (var i = _envScratch.Count - 1; i >= 0; i--)
+        {
+            var (pi, _) = _envScratch[i];
+            for (var j = 0; j < _envScratch.Count; j++)
+            {
+                if (j == i) continue;
+                var (pj, _) = _envScratch[j];
+                var dominates = pj.RatingAmps <= pi.RatingAmps && pj.MeltI2t <= pi.MeltI2t
+                                && CoolingTau(pj.Tau) >= CoolingTau(pi.Tau);
+                // Equal triples were merged above, so domination here is strict in ≥1 axis.
+                if (dominates) { _envScratch.RemoveAt(i); break; }
+            }
+        }
+
+        // Insertion sort by culprit segment key. k is tiny (distinct materials in one
+        // chain) and this avoids any comparer machinery, keeping the tier-0 ambient
+        // re-derate path allocation-free on every runtime the core targets.
+        for (var i = 1; i < _envScratch.Count; i++)
+        {
+            var item = _envScratch[i];
+            var j = i - 1;
+            while (j >= 0 && CompareSeg(_envScratch[j].seg, item.seg) > 0)
+            { _envScratch[j + 1] = _envScratch[j]; j--; }
+            _envScratch[j + 1] = item;
+        }
+
+        // Reuse the chain's arrays in place when membership is unchanged (the common
+        // SetAmbient case: same pairs, re-derated thresholds — tier 0, 0 B). The
+        // ChainSig stored in _liveChains may alias these arrays; every caller
+        // re-registers and overwrites that signature immediately after this call, so
+        // the alias never feeds a stale SameEnvelope comparison.
+        var count = _envScratch.Count;
+        var sameMembership = chain.EnvSegs.Length == count;
+        if (sameMembership)
+            for (var i = 0; i < count; i++)
+                if (!chain.EnvSegs[i].Equals(_envScratch[i].seg)) { sameMembership = false; break; }
+        if (!sameMembership)
+        {
+            chain.EnvPairs = count == 0 ? Array.Empty<I2tPair>() : new I2tPair[count];
+            chain.EnvSegs = count == 0 ? Array.Empty<SegmentKey>() : new SegmentKey[count];
+        }
+        for (var i = 0; i < count; i++)
+        {
+            chain.EnvPairs[i] = _envScratch[i].pair;
+            chain.EnvSegs[i] = _envScratch[i].seg;
+        }
+    }
+
+    // The engine's cooling semantics (Netlist.Limits: `if (tau > 0.0)` gates the
+    // cooling step): tau ≤ 0 never cools, so it compares as +∞ in the dominance test.
+    private static double CoolingTau(double tau) => tau > 0.0 ? tau : double.PositiveInfinity;
+
+    private readonly List<(I2tPair pair, SegmentKey seg)> _envScratch = new();
 
     private void PushEnvelope(Chain chain)
     {
+        var oldSegs = chain.EnvSegs;
         chain.Envelope = ComputeEnvelope(chain);
-        if (!chain.Loop && _net.TryResolve(chain.EquivKey, out var c))
-            _net.Meta.SetLimits(c, chain.Envelope);
+        if (chain.Loop || !_net.TryResolve(chain.EquivKey, out var c)) return;
+        _net.Meta.SetLimits(c, chain.Envelope);
+        RegisterEnvelope(c, chain, oldSegs);
+        _liveChains[chain.EquivKey] = new ChainSig(chain.P, chain.Q, chain.TotalR, chain.Envelope,
+            chain.EnvPairs, chain.EnvSegs);
+    }
+
+    // Register the thermal set with the engine. Same MEMBERSHIP (same culprit segment
+    // list) re-registers in place so per-pair melting integrals survive an ambient
+    // re-derate — exactly the raw graph's behavior, where the accumulator belongs to
+    // the segment. Changed membership clears first (integrals reset; documented in
+    // api.md §19 — a topology-grade envelope change, not a tier-0 re-derate).
+    private void RegisterEnvelope(in ComponentRef c, Chain chain, SegmentKey[] oldSegs)
+    {
+        var sameMembership = oldSegs.Length == chain.EnvSegs.Length;
+        if (sameMembership)
+            for (var i = 0; i < oldSegs.Length; i++)
+                if (!oldSegs[i].Equals(chain.EnvSegs[i])) { sameMembership = false; break; }
+        if (!sameMembership) _net.Meta.SetThermalEnvelope(c, ReadOnlySpan<I2tPair>.Empty);
+        _net.Meta.SetThermalEnvelope(c, chain.EnvPairs);
     }
 
     // ── Reconcile the desired compaction into the netlist, diffing against what is
@@ -328,9 +443,9 @@ public sealed partial class ConductorGraph
         foreach (var kv in _liveChains)
         {
             if (!wantChains.TryGetValue(kv.Key, out var ch)) { removeChains.Add(kv.Key); continue; }
-            var sig = new ChainSig(ch.P, ch.Q, ch.TotalR, ch.Envelope);
+            var sig = new ChainSig(ch.P, ch.Q, ch.TotalR, ch.Envelope, ch.EnvPairs, ch.EnvSegs);
             if (!sig.SameShape(kv.Value)) { removeChains.Add(kv.Key); addChains.Add(ch); }
-            else if (!sig.Env.Equals(kv.Value.Env)) envOnly.Add(ch);
+            else if (!sig.SameEnvelope(kv.Value)) envOnly.Add(ch);
         }
         foreach (var kv in wantChains)
             if (!_liveChains.ContainsKey(kv.Key)) addChains.Add(kv.Value);
@@ -375,9 +490,16 @@ public sealed partial class ConductorGraph
                 var np = ResolveDesiredNode(ch.P.External(), nodeIds);
                 var nq = ResolveDesiredNode(ch.Q.External(), nodeIds);
                 e.AddResistor(np, nq, ch.TotalR, ch.EquivKey, ch.Envelope);
-                _liveChains[ch.EquivKey] = new ChainSig(ch.P, ch.Q, ch.TotalR, ch.Envelope);
+                _liveChains[ch.EquivKey] = new ChainSig(ch.P, ch.Q, ch.TotalR, ch.Envelope,
+                    ch.EnvPairs, ch.EnvSegs);
             }
             e.Commit();
+
+            // Thermal envelopes register post-commit (the ComponentRef exists now).
+            // Fresh components carry no prior envelope, so a plain set suffices.
+            foreach (var ch in addChains)
+                if (ch.EnvPairs.Length > 0 && _net.TryResolve(ch.EquivKey, out var c))
+                    _net.Meta.SetThermalEnvelope(c, ch.EnvPairs);
         }
 
         // Envelope-only changes ride the tier-0 path (no matrix/topology change).
@@ -385,7 +507,11 @@ public sealed partial class ConductorGraph
             if (_net.TryResolve(ch.EquivKey, out var c))
             {
                 _net.Meta.SetLimits(c, ch.Envelope);
-                _liveChains[ch.EquivKey] = new ChainSig(ch.P, ch.Q, ch.TotalR, ch.Envelope);
+                var oldSegs = _liveChains.TryGetValue(ch.EquivKey, out var live)
+                    ? live.PairSegs : Array.Empty<SegmentKey>();
+                RegisterEnvelope(c, ch, oldSegs);
+                _liveChains[ch.EquivKey] = new ChainSig(ch.P, ch.Q, ch.TotalR, ch.Envelope,
+                    ch.EnvPairs, ch.EnvSegs);
             }
     }
 

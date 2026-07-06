@@ -1,0 +1,11 @@
+﻿* manatee island 0
+V0 n0 0 DC 12
+R1 n0 n2 100
+R2 n2 n3 200
+R3 n3 0 300
+.control
+set filetype=ascii
+op
+write output.raw
+.endc
+.end

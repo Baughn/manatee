@@ -903,6 +903,73 @@ public sealed partial class Netlist
 
     // =============================================================== build
 
+    // Scratch for the per-build galvanic-datum selection (shape-time only).
+    private readonly Dictionary<int, int> _buildGalvParent = new();
+    private readonly HashSet<int> _buildDatums = new();
+
+    // Partition the island's members into GALVANIC sub-components — connectivity over
+    // every stamped element EXCEPT the ideal transformer's cross-port link (its two
+    // windings are branches, but primary and secondary share no conductor) — and mark
+    // the first Reference-role node (ascending node slot) of each sub-component as
+    // that sub-component's datum. Result lands in _buildDatums.
+    private void GalvanicDatums(int islandSlot)
+    {
+        _buildGalvParent.Clear();
+        _buildDatums.Clear();
+        foreach (var n in _buildNodes) _buildGalvParent[n] = n;
+
+        int Find(int x)
+        {
+            while (_buildGalvParent[x] != x)
+            {
+                _buildGalvParent[x] = _buildGalvParent[_buildGalvParent[x]];
+                x = _buildGalvParent[x];
+            }
+            return x;
+        }
+        void Uni(int a, int b)
+        {
+            if (!_buildGalvParent.ContainsKey(a) || !_buildGalvParent.ContainsKey(b)) return;
+            int ra = Find(a), rb = Find(b);
+            if (ra != rb) _buildGalvParent[rb] = ra;
+        }
+
+        for (var c = 0; c < _cCount; c++)
+        {
+            if (!_cAlive[c] || _nIsland[_cA[c]] != islandSlot) continue;
+            Uni(_cA[c], _cB[c]);                    // every 2-terminal element is a branch
+            if ((ComponentKind)_cKind[c] == ComponentKind.IdealTransformer)
+            {
+                if (_cC[c] >= 0 && _cD[c] >= 0) Uni(_cC[c], _cD[c]);   // secondary winding
+                // NO union across ports: galvanic isolation is the device's point.
+            }
+            else
+            {
+                if (_cC[c] >= 0) Uni(_cA[c], _cC[c]);
+                if (_cD[c] >= 0) Uni(_cA[c], _cD[c]);
+            }
+        }
+        for (var kc = 0; kc < _kCount; kc++)
+        {
+            if (!_kAlive[kc] || !_kSpec[kc].IsGalvanic || _kStateA[kc] != CouplerState.Closed) continue;
+            if (_nIsland[_kAPos[kc]] != islandSlot) continue;
+            Uni(_kAPos[kc], _kBPos[kc]);
+            Uni(_kANeg[kc], _kBNeg[kc]);
+        }
+
+        // First reference per root, ascending node slot (deterministic: _buildNodes is
+        // an ascending slot scan).
+        foreach (var n in _buildNodes)
+        {
+            if (_nRole[n] != (byte)NodeRole.Reference) continue;
+            var root = Find(n);
+            var taken = false;
+            foreach (var d in _buildDatums)
+                if (Find(d) == root) { taken = true; break; }
+            if (!taken) _buildDatums.Add(n);
+        }
+    }
+
     /// <summary>Construct (or reconstruct) an island's Circuit from the current
     /// document: assign local node indices, pick the reference datum, stamp every
     /// member primitive and closed-galvanic-coupler branch, apply the wiring
@@ -914,18 +981,48 @@ public sealed partial class Netlist
             if (_nAlive[n] && _nIsland[n] == islandSlot) _buildNodes.Add(n);
         var k = _buildNodes.Count;
 
+        // Local-index assignment with ONE PINNED DATUM PER GALVANIC SUB-COMPONENT
+        // (2026-07-06 hardening; TransformerHotInsertTests). An island can hold
+        // galvanically-disjoint pieces tied only by an ideal transformer's aux-row
+        // constraints (AddIdealTransformer between two Ready islands merges them,
+        // §16, and brings BOTH sides' Reference rails along). Those constraints are
+        // purely DIFFERENTIAL, so a side whose rail is not pinned floats at an
+        // arbitrary common-mode offset (the secondary read V/2, its "ground" −V/2).
+        // Fix: the FIRST Reference node of EACH galvanic sub-component aliases onto
+        // the single eliminated datum row — a tie across sub-components that carries
+        // no current (no galvanic return path exists between them, by construction).
+        // Within one sub-component additional references keep the old behavior
+        // (first wins; the rest are ordinary nodes): two partitions merged by a
+        // closed breaker keep their honest two-wire return drop across the neg
+        // bridge — never shorted by rail fiat. Single-datum islands are unchanged.
+        GalvanicDatums(islandSlot);
+
         var refLocal = -1;
+        var dim = 0;
         for (var i = 0; i < k; i++)
         {
             var ns = _buildNodes[i];
-            _nCircuitNode[ns] = i; _nRtSlot[ns] = islandSlot;
-            if (refLocal < 0 && _nRole[ns] == (byte)NodeRole.Reference) refLocal = i;
+            _nRtSlot[ns] = islandSlot;
+            if (_buildDatums.Contains(ns))
+            {
+                if (refLocal < 0) refLocal = dim++;
+                _nCircuitNode[ns] = refLocal;   // this sub-component's datum: pinned at 0
+            }
+            else _nCircuitNode[ns] = dim++;
         }
 
-        var circuit = new Circuit(new SparseLuBackend(), k, refLocal);
+        var circuit = new Circuit(new SparseLuBackend(), dim, refLocal);
         circuit.Dt = companions ? substepDt : _profileDt;
-        var nodeSlots = new int[k];
-        for (var i = 0; i < k; i++) nodeSlots[i] = _buildNodes[i];
+        // Reverse map local index → node slot (fault/readback). The shared reference
+        // index maps to the FIRST reference node in slot order (deterministic; the
+        // eliminated datum row reads 0 V for every aliased reference regardless).
+        var nodeSlots = new int[dim];
+        for (var i = 0; i < dim; i++) nodeSlots[i] = -1;
+        for (var i = 0; i < k; i++)
+        {
+            var li = _nCircuitNode[_buildNodes[i]];
+            if (nodeSlots[li] < 0) nodeSlots[li] = _buildNodes[i];
+        }
 
         var auxRows = new List<int>();
         var auxComps = new List<int>();
@@ -959,13 +1056,13 @@ public sealed partial class Netlist
         // on B — and record the stamps for the per-substep exchange (Netlist.Couplers.cs).
         StampBoundaryCouplers(circuit, islandSlot, companions, substepDt);
 
-        StampWiring(circuit, islandSlot, k, refLocal);
+        StampWiring(circuit, islandSlot, dim, refLocal);
 
         circuit.Analyze();
 
         var rt = _iRuntime[islandSlot];
         rt ??= new IslandRuntime();
-        rt.Circuit = circuit; rt.NodeSlots = nodeSlots; rt.NodeCount = k;
+        rt.Circuit = circuit; rt.NodeSlots = nodeSlots; rt.NodeCount = dim;
         rt.AuxRows = auxRows.ToArray(); rt.AuxComps = auxComps.ToArray(); rt.AuxCount = auxRows.Count;
         rt.HasCompanions = companions; rt.SubstepDt = substepDt;
         rt.CompComps = _buildCompComps.ToArray(); rt.CompKind = _buildCompKind.ToArray();
