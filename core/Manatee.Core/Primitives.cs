@@ -39,12 +39,88 @@ public readonly record struct DiodeParams(double SaturationCurrent, double Emiss
     public static DiodeParams Default => new(1e-14, 1.0, 0.0);
 }
 
-/// <summary>Idealized-transformer coupling parameters (device layer; §7/§18).</summary>
-public readonly record struct TransformerParams(double TurnsRatio, double LeakageHenries, double MagnetizingHenries);
+/// <summary>Decoupling-transformer coupling parameters (device layer; §7/§18).
+/// <para><see cref="TurnsRatio"/> n is the primary:secondary voltage ratio: the
+/// boundary exchange drives the secondary (B) port at V_A / n and reflects the
+/// secondary current back as a primary (A) load of i_B / n (ampere-turns).</para>
+/// <para>Leakage/magnetizing are pinned here as honest element parameters stamped
+/// as ordinary resistors <b>around the port</b> (solver.md Islands: "modeled as
+/// honest device elements but not relied on for stability"). <see cref="MagnetizingOhms"/>
+/// (&gt; 0) stamps a shunt resistor across the primary port — the magnetizing /
+/// core-loss branch, DC-consistent for the behavioral (frequency-agnostic)
+/// coupling. <see cref="LeakageOhms"/> is pinned but <b>not yet stamped</b> (a
+/// series leakage element needs an internal port node; deferred, mirroring the
+/// documented <see cref="DiodeParams.SeriesResistance"/> limitation) — the default
+/// 0 means an ideal, exactly-lossless core.</para></summary>
+public readonly record struct TransformerParams(double TurnsRatio, double LeakageOhms = 0.0, double MagnetizingOhms = 0.0)
+{
+    /// <summary>An ideal decoupling transformer: turns ratio only, no port elements.</summary>
+    public static TransformerParams Ideal(double turnsRatio) => new(turnsRatio);
+}
 
-/// <summary>Converter efficiency curve (behavioral two-port; §7). Placeholder
-/// piecewise model — a single flat efficiency for now.</summary>
-public readonly record struct EfficiencyCurve(double PeakEfficiency, double KneeWatts);
+/// <summary>
+/// Converter efficiency curve (behavioral two-port; §7): up to four
+/// (load-fraction, efficiency) breakpoints with linear interpolation, clamped flat
+/// beyond the ends. Load fraction is P_out / rated power (the converter carries the
+/// rating). Blittable readonly struct — storable in <see cref="CouplerSpec"/>.
+/// </summary>
+public readonly struct EfficiencyCurve
+{
+    private readonly double _l0, _e0, _l1, _e1, _l2, _e2, _l3, _e3;
+    private readonly int _count;
+
+    private EfficiencyCurve(int count,
+        double l0, double e0, double l1, double e1, double l2, double e2, double l3, double e3)
+    {
+        _count = count;
+        _l0 = l0; _e0 = e0; _l1 = l1; _e1 = e1; _l2 = l2; _e2 = e2; _l3 = l3; _e3 = e3;
+    }
+
+    /// <summary>A constant efficiency at every load.</summary>
+    public static EfficiencyCurve Flat(double efficiency)
+        => new(1, 0.0, efficiency, 0, 0, 0, 0, 0, 0);
+
+    /// <summary>1–4 (loadFraction, efficiency) breakpoints, strictly ascending in
+    /// load fraction. Allocates at construction (shape-time); the readback
+    /// <see cref="EfficiencyAt"/> is allocation-free.</summary>
+    public static EfficiencyCurve Points(params (double loadFraction, double efficiency)[] points)
+    {
+        if (points is null || points.Length < 1 || points.Length > 4)
+            throw new ArgumentException("EfficiencyCurve needs 1..4 breakpoints.", nameof(points));
+        for (var i = 1; i < points.Length; i++)
+            if (!(points[i].loadFraction > points[i - 1].loadFraction))
+                throw new ArgumentException("EfficiencyCurve breakpoints must be strictly ascending in load fraction.", nameof(points));
+        (double l, double e) p0 = points[0];
+        (double l, double e) p1 = points.Length > 1 ? points[1] : default;
+        (double l, double e) p2 = points.Length > 2 ? points[2] : default;
+        (double l, double e) p3 = points.Length > 3 ? points[3] : default;
+        return new EfficiencyCurve(points.Length, p0.l, p0.e, p1.l, p1.e, p2.l, p2.e, p3.l, p3.e);
+    }
+
+    /// <summary>Number of breakpoints (1 ⇒ flat).</summary>
+    public int Count => _count;
+
+    /// <summary>Linear-interpolated efficiency at a load fraction, clamped flat past
+    /// the first/last breakpoint. Allocation-free; two compares + one lerp.</summary>
+    public double EfficiencyAt(double loadFraction)
+    {
+        if (_count <= 1) return _e0;
+        if (loadFraction <= _l0) return _e0;
+        double lPrev = _l0, ePrev = _e0;
+        for (var i = 1; i < _count; i++)
+        {
+            double li = i == 1 ? _l1 : i == 2 ? _l2 : _l3;
+            double ei = i == 1 ? _e1 : i == 2 ? _e2 : _e3;
+            if (loadFraction <= li)
+            {
+                var t = (loadFraction - lPrev) / (li - lPrev);
+                return ePrev + t * (ei - ePrev);
+            }
+            lPrev = li; ePrev = ei;
+        }
+        return ePrev;   // beyond the last breakpoint ⇒ clamp flat
+    }
+}
 
 /// <summary>i²t slow-overload accumulator parameters (api.md §12).</summary>
 public readonly record struct I2tParams(double MeltI2t, double Tau);

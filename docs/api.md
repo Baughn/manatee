@@ -457,9 +457,14 @@ public readonly struct CouplerSpec
     // is honest but not relied on for stability.
     public static CouplerSpec DecouplingTransformer(in TransformerParams p, double relaxationAlpha = 0.5);
 
-    // Stationeers xfmr/charger: behavioral P-transfer with efficiency curve and a
-    // real DC-link capacitor as the boundary storage. Both sides stay linear.
-    public static CouplerSpec ConverterTwoPort(in EfficiencyCurve e, double dcLinkFarads);
+    // Stationeers xfmr/charger: behavioral P-transfer. The B port is regulated to
+    // `outputVolts`; P_out is measured, the efficiency curve gives η at load fraction
+    // P_out/`ratedWatts`, and P_in = P_out/η is drawn from A. The modeled efficiency
+    // loss P_out·(1/η−1) is computed INDEPENDENTLY from the curve (not synthesized as
+    // In−Out) and dumped as HeatDumpedJ ≥ 0. `dcLinkFarads` is the intended boundary
+    // storage; `relaxationAlpha` damps the per-substep exchange. Both sides stay linear.
+    public static CouplerSpec ConverterTwoPort(in EfficiencyCurve e, double dcLinkFarads,
+        double outputVolts, double ratedWatts, double relaxationAlpha = 0.5);
 }
 
 public readonly struct CouplerPorts { public NodeId APos, ANeg, BPos, BNeg; }
@@ -475,10 +480,36 @@ Islands joined by boundary couplings form **one scheduling unit** and substep
 in lockstep (solver.md): the per-substep exchange happens inside the unit,
 never across free-running threads, so it is deterministic. Each boundary
 carries a running energy ledger; `SurplusJ` is never stored as work — it is
-converted to `HeatDumpedJ` (design.md energy rule; the coupling-conservation
-and dissipativity property tests read `EnergyLedger` directly). Under
+converted to `HeatDumpedJ` (design.md energy rule). Under
 `ClientPartitioned`, couplers are the **only** sanctioned cross-partition
 join.
+
+**Conservation is physical, not clerical (ruled 2026-07-06, after the
+phase-5 review found the ledger-only clamp non-conservative — a
+gain-capable two-coupler loop grew a seeded 8.6 J to 85 J).** The ledger
+records; it does not license. Two mechanisms make the physics honest, both
+instances of design.md's existing debit rule:
+
+- **Transformer boundaries carry an energy-debt feedback**: when cumulative
+  delivered-to-B exceeds drawn-from-A minus modeled loss (the one-substep
+  lag's over-delivery), the deficit **debits** the B-side feed-forward
+  (droop on the injected amplitude) until the ledger balances — the same
+  mechanism R18 prescribes for the adaptor ("deliverable = advertised −
+  accumulated debt"). Over any window, OutJ ≤ InJ − ModeledLossJ + O(one
+  substep of lag).
+- **The converter's B port IS the DC-link capacitor** (solver.md said so
+  all along: "storage by construction"): A charges it with power bounded by
+  the efficiency curve and A's actual delivery; B's voltage is the cap
+  voltage and **sags under deficit** — brownout at a starved converter is
+  the honest, legible behavior, not a deadlock. The regulated setpoint is
+  the charge controller's target, never an ideal source.
+
+Conservation tests are **windowed physical audits** (source energy =
+dissipated + Δstored + coupler heat, summed over both islands from public
+readbacks), not `EnergyLedger.Residual` — Residual is a definitional
+closure identity (~0 by construction) and can never signal a violation.
+The dissipativity gate runs at **gain-capable turns ratios** (loop voltage
+gain ≥ 1), where a non-conservative exchange demonstrably rings up.
 
 ## 8. SteadyStateGuard and AllocationSentinel (OQ2)
 
@@ -1550,11 +1581,13 @@ Carried explicitly; none blocks implementation start.
 3. **AdjustEpsilon default (1e-4)** is a guess; the *definition* (§9) is
    pinned, the default is tuned by benchmark/oracle before the tier-budget
    goldens are authored.
-4. **Parameter structs left as named sketches:** `TransformerParams`,
-   `EfficiencyCurve`, `I2tParams`, `DiodeParams`,
+4. **Parameter structs left as named sketches:** `I2tParams`,
    `GraphOptions`, `SegmentKey`/`JunctionKey` layouts, `DebugLevel`. Roles
    and homes are fixed; fields fill in at implementation. (`SubstepPlan`
-   fields are now fixed — `Substeps` / `SubstepDt` / `HysteresisBand`, §11.)
+   fields are now fixed — `Substeps` / `SubstepDt` / `HysteresisBand`, §11.
+   `TransformerParams` = `(TurnsRatio, LeakageOhms, MagnetizingOhms)`,
+   `EfficiencyCurve` = 1–4 `(loadFraction, efficiency)` breakpoints, and
+   `DiodeParams` are now pinned — see `Primitives.cs`/`Couplers.cs`.)
 5. **Cross-platform FP:** bit-for-bit determinism is scoped to one
    `EnvFingerprint` (runtime/arch/build); CI runs the corpus on x64 and
    arm64 with tolerance diffing. Whether to forbid FMA-contractible patterns

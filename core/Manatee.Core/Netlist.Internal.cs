@@ -82,7 +82,14 @@ public sealed partial class Netlist
         return slot;
     }
 
-    private void FreeCouplerSlot(int slot) { _kAlive[slot] = false; _kGen[slot]++; _kFree.Push(slot); }
+    private void FreeCouplerSlot(int slot)
+    {
+        _kAlive[slot] = false; _kGen[slot]++; _kFree.Push(slot);
+        // Drop the exchange runtime so a reused slot starts with a fresh ledger /
+        // relaxation state rather than inheriting the removed coupler's accumulators.
+        if (slot < _kRuntime.Length) _kRuntime[slot] = null;
+        _unitsDirty = true;
+    }
 
     private void EnsureProbeCap(int min)
     {
@@ -119,13 +126,13 @@ public sealed partial class Netlist
         else { slot = _iSlotCount++; EnsureIslandCap(_iSlotCount); _iGen[slot] = FirstGen; }
         _iAlive[slot] = true; _iStatus[slot] = (byte)IslandStatus.Dirty; _iNeedsRebuild[slot] = false; _iNodeCount[slot] = 0;
         _iSubstepN[slot] = 0; _iSubstepDt[slot] = 0.0; _iSubstepRawRef[slot] = 0.0;   // fresh subcycle plan
-        _iAliveCount++; _idsDirty = true;
+        _iAliveCount++; _idsDirty = true; _unitsDirty = true;
         return slot;
     }
 
     private void FreeIslandSlot(int slot)
     {
-        _iAlive[slot] = false; _iGen[slot]++; _iAliveCount--; _iFree.Push(slot); _idsDirty = true;
+        _iAlive[slot] = false; _iGen[slot]++; _iAliveCount--; _iFree.Push(slot); _idsDirty = true; _unitsDirty = true;
         _iRuntime[slot] = null; _iRuntimeStale[slot] = false; _iFault[slot] = default;   // drop the numeric runtime
     }
 
@@ -261,6 +268,14 @@ public sealed partial class Netlist
 
     internal int StageAddSine(StructuralEdit e, NodeId pos, NodeId neg, in SineDrive d, in ExternalKey key, in StateKey state)
     {
+        // A sine source in a NON-Mixed profile is legal but single-sampled per tick
+        // (no ≥20-samples/cycle guarantee) — canon ruled it accepted+warned, same
+        // family as the floating-Return footgun (api.md §5 note, 2026-07-06).
+        if (_debug && _profileKind != SolverProfile.Regime.Mixed)
+            System.Diagnostics.Debug.WriteLine(
+                $"AddSineSource in a non-Mixed profile ({_profileKind}): the source is single-sampled " +
+                "per tick (heavily undersampled — deterministic and phase-wrapped, but no subcycling). " +
+                "Use SolverProfile.Mixed for AC islands (api.md §5).");
         var sa = RequireNode(pos); var sb = RequireNode(neg);
         var slot = ReserveCompSlot();
         _cAlive[slot] = true; _cKind[slot] = (byte)ComponentKind.VSource; _cA[slot] = sa; _cB[slot] = sb; _cC[slot] = -1; _cD[slot] = -1;
@@ -455,7 +470,7 @@ public sealed partial class Netlist
         }
 
         var jTo = _journal.Head;
-        _idsDirty = true;
+        _idsDirty = true; _unitsDirty = true;
         _editActive = false;
 
         var lapped = jTo - jFrom > _journal.Capacity;
@@ -591,7 +606,7 @@ public sealed partial class Netlist
     {
         _iNeedsRebuild[isl] = true;
         _iStatus[isl] = (byte)IslandStatus.Dirty;
-        _idsDirty = true;
+        _idsDirty = true; _unitsDirty = true;
     }
 
     private void MarkComponentDirty(int slot)
@@ -689,7 +704,7 @@ public sealed partial class Netlist
             _cGen[c]++; _cInvalidSeq[c] = seq; _cInvalidKind[c] = (byte)TopologyEventKind.IslandRebuilt;
         }
 
-        _idsDirty = true;
+        _idsDirty = true; _unitsDirty = true;
     }
 
     private void ApplyReconfigure(CouplerId id, CouplerState state)
@@ -698,7 +713,8 @@ public sealed partial class Netlist
         if (_kStateA[slot] == state) return;
         var galvanic = _kSpec[slot].IsGalvanic;
         _kStateA[slot] = state;
-        if (!galvanic) return;   // boundary: exchange toggle only (phase 5)
+        _unitsDirty = true;   // exchange-active state changed; unit membership is existence-based but recheck is cheap
+        if (!galvanic) return;   // boundary: exchange toggle only (the exchange itself runs in StepUnit)
 
         if (state == CouplerState.Closed)
         {
@@ -838,10 +854,22 @@ public sealed partial class Netlist
 
     internal int CollectDirty(Span<IslandHandle> into)
     {
+        // One handle per SCHEDULING UNIT: boundary-coupled islands dedupe to their unit
+        // lead (api.md §11). A unit is emitted once when ANY member is Dirty; the handle
+        // is the lead (the only member the client may Step). 0B: preallocated dedupe
+        // marks, no per-call allocation.
+        EnsureUnitsFresh();
+        _collectEpoch++;
         var n = 0;
         for (var s = 0; s < _iSlotCount && n < into.Length; s++)
-            if (_iAlive[s] && _iStatus[s] == (byte)IslandStatus.Dirty)
-                into[n++] = new IslandHandle(this, s, _iGen[s]);
+        {
+            if (!_iAlive[s] || _iStatus[s] != (byte)IslandStatus.Dirty) continue;
+            var lead = _iUnitLead[s];
+            if (lead < 0) lead = s;
+            if (_iCollectMark[lead] == _collectEpoch) continue;   // unit already emitted
+            _iCollectMark[lead] = _collectEpoch;
+            into[n++] = new IslandHandle(this, lead, _iGen[lead]);
+        }
         return n;
     }
 

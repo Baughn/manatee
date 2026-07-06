@@ -171,11 +171,22 @@ public readonly struct IslandHandle
     /// <summary>Running energy ledger. Zeroed until the solve pipeline lands.</summary>
     public EnergyAudit Energy => default;
 
-    /// <summary>Boundary-coupler exchange instrumentation (phase 5).</summary>
-    public ExchangeView Exchange(CouplerId c) => default;
+    /// <summary>Boundary-coupler exchange instrumentation (api.md §7): last-substep
+    /// amplitudes/phases and signed A→B power. For a Closed galvanic breaker,
+    /// <see cref="ExchangeView.PowerA2B"/> is the signed through-flow from the 1 mΩ
+    /// bridge branch. Coupler-scoped (not island-scoped) — the same value for any
+    /// handle in the netlist.</summary>
+    public ExchangeView Exchange(CouplerId c) => _net.ExchangeViewOf(c);
 
-    /// <summary>Boundary-coupler energy ledger (phase 5).</summary>
-    public EnergyLedger Ledger(CouplerId c) => default;
+    /// <summary>Boundary-coupler running energy ledger (api.md §7): InJ/OutJ/
+    /// ModeledLossJ integrated per substep. The LOAD-BEARING no-free-energy invariant is
+    /// SurplusJ = InJ−OutJ−ModeledLossJ ≥ 0 (genuine now that ModeledLossJ is computed
+    /// independently from the efficiency curve, not synthesized as In−Out); HeatDumpedJ =
+    /// ModeledLossJ + SurplusJ is the dumped heat (never stored work), ≥ 0 by construction.
+    /// Residual is the ledger's CLOSURE identity (InJ = OutJ + HeatDumpedJ), ≈ 0 by
+    /// construction — it audits the readback arithmetic, not that the physical exchange
+    /// conserved (that bound is the OutJ clamp).</summary>
+    public EnergyLedger Ledger(CouplerId c) => _net.LedgerOf(c);
 
     private static NotSupportedException NotYet()
         => new("Snapshot/restore is phase 6 (api.md §14); not implemented in the document stage.");

@@ -21,11 +21,21 @@ public readonly struct CouplerSpec
     /// into one island; Open schedules a split rebuild.</summary>
     public bool IsGalvanic => Kind == Family.Breaker;
 
-    /// <summary>Boundary relaxation α (boundary families only; phase 5).</summary>
+    /// <summary>Boundary relaxation α — exponential-smoothing factor on the
+    /// per-substep exchanged values (boundary families only). 1 ⇒ no smoothing.</summary>
     public double RelaxationAlpha { get; private init; }
 
-    /// <summary>DC-link storage (ConverterTwoPort only; phase 5).</summary>
+    /// <summary>DC-link storage capacitance, farads (ConverterTwoPort only): the
+    /// real boundary-storage capacitor stamped on the B side.</summary>
     public double DcLinkFarads { get; private init; }
+
+    /// <summary>Regulated DC-link output voltage setpoint, volts (ConverterTwoPort
+    /// only): the B-side port is held at this level (a real regulator's job).</summary>
+    public double OutputVolts { get; private init; }
+
+    /// <summary>Rated output power, watts (ConverterTwoPort only): the denominator
+    /// for the efficiency curve's load fraction (P_out / rated).</summary>
+    public double RatedWatts { get; private init; }
 
     /// <summary>Transformer coupling parameters (DecouplingTransformer only).</summary>
     public TransformerParams Transformer { get; private init; }
@@ -44,9 +54,17 @@ public readonly struct CouplerSpec
         => new() { Kind = Family.DecouplingTransformer, Transformer = p, RelaxationAlpha = relaxationAlpha };
 
     /// <summary>Behavioral P-transfer with efficiency curve and a real DC-link
-    /// capacitor as boundary storage (phase 5). Both sides stay linear.</summary>
-    public static CouplerSpec ConverterTwoPort(in EfficiencyCurve e, double dcLinkFarads)
-        => new() { Kind = Family.ConverterTwoPort, Efficiency = e, DcLinkFarads = dcLinkFarads };
+    /// capacitor as boundary storage. Both sides stay linear: the B port is held at
+    /// <paramref name="outputVolts"/>, P_out is measured, P_in = P_out / efficiency
+    /// is drawn from A, and the efficiency loss becomes coupler heat. Load fraction
+    /// for the curve is P_out / <paramref name="ratedWatts"/>.</summary>
+    public static CouplerSpec ConverterTwoPort(in EfficiencyCurve e, double dcLinkFarads,
+        double outputVolts, double ratedWatts, double relaxationAlpha = 0.5)
+        => new()
+        {
+            Kind = Family.ConverterTwoPort, Efficiency = e, DcLinkFarads = dcLinkFarads,
+            OutputVolts = outputVolts, RatedWatts = ratedWatts, RelaxationAlpha = relaxationAlpha,
+        };
 }
 
 /// <summary>The four terminals a coupler bridges (api.md §7).</summary>

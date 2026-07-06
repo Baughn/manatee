@@ -320,6 +320,7 @@ public sealed partial class Netlist
         }
 
         // ── Numeric pass: dirty (or all) islands, deterministic Ids order. ──
+        EnsureUnitsFresh();
         var ids = IslandIdsOrdered();
         // Copy slots out first: NumericSolveIsland can allocate but never mutates
         // island membership, so the Ids span stays valid across the loop.
@@ -328,8 +329,16 @@ public sealed partial class Netlist
         foreach (var slot in _numericScratch)
         {
             if (!_iAlive[slot]) continue;
-            // A transient island (sine/storage) advances time every tick, so it solves
-            // even when untouched (status Ready) — not just dirty units (solver.md).
+            if (RouteAsUnit(slot))
+            {
+                // Boundary-coupled islands are one scheduling unit: only the lead solves
+                // it (in lockstep); non-lead members are covered by the lead's StepUnit.
+                if (!IsUnitLead(slot)) continue;
+                if (operatingPoint || UnitNeedsSolve(slot)) StepUnit(slot, dt, operatingPoint);
+                continue;
+            }
+            // Solo island: a transient one (sine/storage) advances time every tick, so
+            // it solves even when untouched (status Ready) — not just dirty (solver.md).
             if (operatingPoint || _iStatus[slot] == (byte)IslandStatus.Dirty || IslandIsTransient(slot))
                 NumericSolveIsland(slot, dt, operatingPoint);
         }
@@ -859,6 +868,11 @@ public sealed partial class Netlist
             circuit.AddResistor(_nCircuitNode[_kANeg[kc]], _nCircuitNode[_kBNeg[kc]], CouplerBridgeOhms);
         }
 
+        // Boundary couplers (DecouplingTransformer / ConverterTwoPort) inject their
+        // per-side elements — a current source on A, a voltage source (+ DC-link cap)
+        // on B — and record the stamps for the per-substep exchange (Netlist.Couplers.cs).
+        StampBoundaryCouplers(circuit, islandSlot, companions, substepDt);
+
         StampWiring(circuit, islandSlot, k, refLocal);
 
         circuit.Analyze();
@@ -1075,11 +1089,24 @@ public sealed partial class Netlist
         try
         {
             if (_iNeedsRebuild[slot]) { RebuildIsland(slot); _lastTickStats.IslandRebuilds++; }
-            // A split may have retired this slot; re-check before the numeric pass. A
-            // transient island (sine/storage) advances time every tick, so it steps even
-            // when the document is untouched (status Ready) — solver.md subcycled AC.
-            if (_iAlive[slot] && (_iStatus[slot] == (byte)IslandStatus.Dirty || _iRuntimeStale[slot]
-                                  || IslandIsTransient(slot)))
+            if (!_iAlive[slot]) return;   // a split may have retired this slot
+
+            EnsureUnitsFresh();
+            if (RouteAsUnit(slot))
+            {
+                // Step on a non-lead member of a coupled unit is a scheduling error:
+                // the client must Step the unit's lead (api.md §11). Debug-assert; in
+                // release, no-op (the lead's Step covers the whole unit in lockstep).
+                Debug.Assert(IsUnitLead(slot),
+                    "Step on a non-lead member of a boundary-coupled scheduling unit (api.md §11) — Step the unit lead.");
+                if (!IsUnitLead(slot)) return;
+                if (UnitNeedsSolve(slot)) StepUnit(slot, clock.Dt, operatingPoint: false);
+                return;
+            }
+
+            // Solo island. A transient island (sine/storage) advances time every tick,
+            // so it steps even when the document is untouched (Ready) — subcycled AC.
+            if (_iStatus[slot] == (byte)IslandStatus.Dirty || _iRuntimeStale[slot] || IslandIsTransient(slot))
                 NumericSolveIsland(slot, clock.Dt, operatingPoint: false);
         }
         finally
