@@ -25,8 +25,13 @@ public sealed partial class Netlist
         if (p.Net != _netId || (uint)p.Slot >= (uint)_pCount || !_pAlive[p.Slot] || _pGen[p.Slot] != p.Gen)
             return 0.0;
         var slot = p.Slot;
-        var va = NodePotential(_pA[slot]);
-        var vb = NodePotential(_pB[slot]);
+        var na = _pA[slot]; var nb = _pB[slot];
+        // Aim-liveness (§13/§20): a probe whose aimed node was removed carries a
+        // dangling (-1) aim (invalidated at CommitEdit) and reads 0 until re-aimed —
+        // never the freed slot's next occupant. The _nAlive check is belt-and-braces.
+        if (na < 0 || nb < 0 || !_nAlive[na] || !_nAlive[nb]) return 0.0;
+        var va = NodePotential(na);
+        var vb = NodePotential(nb);
         return va + _pT[slot] * (vb - va);
     }
 
@@ -47,9 +52,11 @@ public sealed partial class Netlist
             if (p.Net != _netId || (uint)p.Slot >= (uint)_pCount || !_pAlive[p.Slot] || _pGen[p.Slot] != p.Gen)
                 continue;
             var na = _pA[p.Slot];
-            if (!_nAlive[na] || _nIsland[na] != islandSlot) continue;   // probe not in this island
+            var nb = _pB[p.Slot];
+            if (na < 0 || nb < 0 || !_nAlive[na] || !_nAlive[nb] || _nIsland[na] != islandSlot)
+                continue;   // probe not in this island / dangling aim (§13)
             var va = NodePotential(na);
-            var vb = NodePotential(_pB[p.Slot]);
+            var vb = NodePotential(nb);
             tap.Ring.Push(va + _pT[p.Slot] * (vb - va));
         }
     }

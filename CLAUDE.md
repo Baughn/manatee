@@ -8,7 +8,9 @@ consuming manatee-core as a git submodule). Spiritual successor to
 Minecraft's Electrical Age. Educational realism is the point: the game is
 hard *because* real electricity is.
 
-**Status:** design phase complete (2026-07); no code yet.
+**Status:** manatee-core IMPLEMENTED (overnight build landed 2026-07-06;
+builds zero-warning, fast + oracle suites green). `docs/api.md` is the
+binding as-built surface. Next: 2D schematic harness, then Re-Volt / VS.
 **Delivery order:** manatee-core + 2D schematic harness → Stationeers/Re-Volt
 → Vintage Story mod.
 
@@ -56,6 +58,8 @@ see `third_party/CLAUDE.md` for what's there and the decompile caveats.
   Build/test: `dotnet build Manatee.sln`, `dotnet test Manatee.sln`;
   fast loop skips the ngspice tests: `dotnet test --filter 'Category!=Oracle'`.
   Oracle tests hard-fail outside the devshell — that's by design.
+  Benchmarks: `scripts/bench.sh smoke|run|compare [filter]` (BenchmarkDotNet +
+  MemoryDiagnoser, jj-aware @ vs @- compare; runs inside `nix develop`).
 - New files must be `git add`ed before nix sees them (flake evaluation
   reads the git index; jj reconciles at commit time).
 - VCS is **jj** (colocated git). `third_party/stationeers-decomp/` is

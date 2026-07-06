@@ -56,6 +56,19 @@ public sealed class ZeroAllocationTests
             $"tier-1/2 loop allocated {best} B over 20 refactor + 100 solve (min over 8 runs; expected 0)");
     }
 
+    /// <summary>api.md §8 open item #2: every standing zero-alloc gate early-returns
+    /// when the per-thread allocation counter is inert, so on an arbitrary runtime
+    /// they can silently degrade to no-ops. The PINNED devshell/CI runtime (net8.0
+    /// CoreCLR) has a live counter — assert it, so a future runtime bump that muted
+    /// the counter turns the zero-alloc promise loudly red instead of
+    /// green-by-vacuity. Category=Oracle: devshell-pinned, hard-fails elsewhere by
+    /// design (same policy as the ngspice gates).</summary>
+    [Fact]
+    [Trait("Category", "Oracle")]
+    public void Allocation_counter_is_live_on_the_pinned_ci_runtime()
+        => Assert.True(CounterIsReliable(),
+            "GC.GetAllocatedBytesForCurrentThread is inert on this runtime — every zero-alloc gate is silently skipping (api.md §8).");
+
     // One-time capability probe (api.md §8 AllocationSentinel pattern): allocate a
     // small object and confirm the per-thread counter observed it.
     private static bool CounterIsReliable()

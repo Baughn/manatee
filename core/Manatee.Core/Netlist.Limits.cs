@@ -28,6 +28,19 @@ public sealed partial class Netlist
     private double[] _cI2t = new double[8];      // melting-integral accumulator (A²·s)
     private bool[] _cI2tTripped = new bool[8];   // rising-edge latch for the ThermalI2t event
 
+    // ── Instantaneous-event coalescing (api.md §12 ruling 2026-07-06): at most ONE
+    // OverCurrent/OverVoltage/OverPower event per (component, kind) per tick, carrying
+    // the WORST observed substep value. Without this, a sustained AC overload on a
+    // subcycled island emits N events/tick, saturating the 16-slot ring with one
+    // component and dropping everyone else's events — the R9 legibility failure the
+    // ruling closed. Slot-parallel, 0 B on the hot path: [c·3 + kind] holds the tick a
+    // (component, kind) event was last recorded at and its ring position, so a later
+    // substep of the same tick updates the ring entry in place. ThermalI2t keeps its
+    // edge-latch semantics and never routes through this. ──
+    private const int CoalescedKinds = 3;        // OverCurrent, OverVoltage, OverPower
+    private long[] _limSeenTick = InitEvalTick(8 * CoalescedKinds);
+    private int[] _limRingPos = new int[8 * CoalescedKinds];
+
     // ── Thermal ENVELOPES (api.md §12/§19 "i²t envelopes are Pareto sets", ruled
     // 2026-07-06). A component may carry 1..k (rating, melt, tau) pairs registered via
     // Meta.SetThermalEnvelope — flat SoA pool storage, one accumulator + trip latch per
@@ -93,6 +106,10 @@ public sealed partial class Netlist
         var cap = Math.Max(min, _cI2t.Length * 2);
         Array.Resize(ref _cI2t, cap); Array.Resize(ref _cI2tTripped, cap);
         Array.Resize(ref _cEnvStart, cap); Array.Resize(ref _cEnvCount, cap); Array.Resize(ref _cEnvCap, cap);
+        var oldLen = _limSeenTick.Length;
+        Array.Resize(ref _limSeenTick, cap * CoalescedKinds);
+        Array.Resize(ref _limRingPos, cap * CoalescedKinds);
+        for (var i = oldLen; i < _limSeenTick.Length; i++) _limSeenTick[i] = -1;
     }
 
     private void EnsureEnvPoolCap(int min)
@@ -286,7 +303,44 @@ public sealed partial class Netlist
         var ring = _iLimitRing[islandSlot];
         if (ring is null) { ring = new LimitEvent[LimitRingCapacity]; _iLimitRing[islandSlot] = ring; }
 
-        if (_iLimitCount[islandSlot] >= LimitRingCapacity) { _iLimitOverflow[islandSlot]++; return; }
+        // Coalesce instantaneous kinds to one event per (component, kind) per tick
+        // (api.md §12 ruling): a repeat within the tick updates the live ring entry in
+        // place with the worst observed value instead of emitting again. ThermalI2t is
+        // edge-latched by its accumulator and never re-enters within a tick.
+        var li = -1;
+        if (kind != LimitKind.ThermalI2t)
+        {
+            li = compSlot * CoalescedKinds + (int)kind;
+            if (_limSeenTick[li] == tickIndex)
+            {
+                var pos = _limRingPos[li];
+                if (pos < 0) return;   // this tick's event was already counted as dropped
+                // Update only if the recorded slot is still LIVE in the ring (not
+                // drained mid-tick and overwritten) and really is this tick's event.
+                var count = _iLimitCount[islandSlot];
+                var startIdx = ((_iLimitHead[islandSlot] - count) % LimitRingCapacity + LimitRingCapacity) % LimitRingCapacity;
+                var live = ((pos - startIdx + LimitRingCapacity) % LimitRingCapacity) < count;
+                if (live && ring[pos].TickIndex == tickIndex && ring[pos].Kind == kind
+                    && ring[pos].Source.Slot == compSlot)
+                {
+                    if (observed > ring[pos].Observed)
+                    {
+                        ring[pos].Observed = observed;
+                        ring[pos].SubstepTime = substepTime;
+                    }
+                    return;
+                }
+                // Drained mid-tick: fall through and emit a fresh event.
+            }
+        }
+
+        if (_iLimitCount[islandSlot] >= LimitRingCapacity)
+        {
+            _iLimitOverflow[islandSlot]++;
+            // One notional (coalesced) event per (component, kind) per tick ⇒ one drop.
+            if (li >= 0) { _limSeenTick[li] = tickIndex; _limRingPos[li] = -1; }
+            return;
+        }
 
         var idx = _iLimitHead[islandSlot];
         ring[idx] = new LimitEvent
@@ -298,6 +352,7 @@ public sealed partial class Netlist
         };
         _iLimitHead[islandSlot] = (idx + 1) % LimitRingCapacity;
         _iLimitCount[islandSlot]++;
+        if (li >= 0) { _limSeenTick[li] = tickIndex; _limRingPos[li] = idx; }
     }
 
     // Drain (api.md §12): oldest-first, up to the caller span; a too-small span

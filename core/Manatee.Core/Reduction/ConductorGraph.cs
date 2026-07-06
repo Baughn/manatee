@@ -128,7 +128,6 @@ public sealed partial class ConductorGraph
 
     private readonly Dictionary<ExternalKey, ProbeRec> _probes = new();
     private readonly List<ProbeRec> _probeList = new();
-    private ulong _probeCounter;
 
     // ── Attribution cache (component slot → chain index) ──
     private readonly Dictionary<int, int> _slotToChain = new();
@@ -316,8 +315,11 @@ public sealed partial class ConductorGraph
     /// It survives series collapse: the read interpolates by cumulative-resistance
     /// fraction along the collapsed chain, so an instrument reads "inside" a compacted
     /// run. The <see cref="ProbeId"/> is document-stable (re-aimed, never re-issued,
-    /// across ordinary recompaction; §16) — re-resolve only after a
-    /// <see cref="Resync"/>.</summary>
+    /// across ordinary recompaction AND a <see cref="Resync"/>; §16). The probe's
+    /// <see cref="ExternalKey"/> is DERIVED from <c>(segment, along, ordinal)</c> —
+    /// see <see cref="ProbeKey"/> — so a client can re-derive it and re-resolve via
+    /// <c>TryResolveProbe</c> after a <c>FromCanonical</c> reload or a re-driven
+    /// intake (api.md §13/§19).</summary>
     public ProbeId AddProbe(in SegmentKey k, double along)
     {
         if (!_segs.ContainsKey(k))
@@ -325,7 +327,15 @@ public sealed partial class ConductorGraph
         along = along < 0 ? 0 : along > 1 ? 1 : along;
         EnsureCompacted();
 
-        var key = new ExternalKey(0xFFFF_FFFF_FFFF_FFFCUL, ++_probeCounter);
+        // Ordinal disambiguates co-located probes (same segment, same quantized
+        // along) in AddProbe call order; the first is ordinal 0, so the common
+        // one-probe-per-spot client can re-derive its key from geometry alone.
+        var ord = 0;
+        var q = QuantizeAlong(along);
+        foreach (var pr in _probeList)
+            if (pr.Seg.Equals(k) && QuantizeAlong(pr.Along) == q) ord++;
+
+        var key = ProbeKey(k, along, ord);
         var rec = new ProbeRec { Seg = k, Along = along, Key = key };
         ComputeProbeAim(rec, out var repP, out var repQ, out var t);
 
@@ -338,6 +348,40 @@ public sealed partial class ConductorGraph
         _probes[key] = rec;
         _probeList.Add(rec);
         return rec.Id;
+    }
+
+    /// <summary>The deterministic, TOPOLOGICAL identity a reduction-owned probe
+    /// carries (api.md §3/§13/§19): derived from <c>(segment, along, ordinal)</c>, so
+    /// two graphs built from the same geometry mint the same key and a client can
+    /// reconstruct it — never a call-order counter. <paramref name="along"/> is
+    /// quantized to 1e-9 (finer than any physical placement); <paramref name="ordinal"/>
+    /// counts earlier co-located probes (0 for the first). Collision posture: the low
+    /// word is a splitmix64 avalanche of the 192 input bits under the reserved
+    /// <c>0xFFFF_FFFF_FFFF_FFFC</c> Hi tag — a same-graph collision is birthday-scale
+    /// (~2⁻³² at 100k probes) and surfaces as the debug duplicate-ExternalKey throw at
+    /// AddProbe, never as silent aliasing.</summary>
+    public static ExternalKey ProbeKey(in SegmentKey k, double along, int ordinal = 0)
+    {
+        var q = QuantizeAlong(along < 0 ? 0 : along > 1 ? 1 : along);
+        var h = Mix64(k.Hi ^ 0x9E37_79B9_7F4A_7C15UL);
+        h = Mix64(h ^ k.Lo);
+        h = Mix64(h ^ q);
+        h = Mix64(h ^ (ulong)(uint)ordinal);
+        return new ExternalKey(ProbeKeyHiTag, h);
+    }
+
+    private const ulong ProbeKeyHiTag = 0xFFFF_FFFF_FFFF_FFFCUL;
+
+    private static ulong QuantizeAlong(double along)
+        => (ulong)System.Math.Round(along * 1_000_000_000.0);
+
+    // splitmix64 finalizer: shifts/xors/multiplies only — bit-identical on every
+    // runtime the core targets (the determinism rule; no libm, no FP).
+    private static ulong Mix64(ulong z)
+    {
+        z = (z ^ (z >> 30)) * 0xBF58_476D_1CE4_E5B9UL;
+        z = (z ^ (z >> 27)) * 0x94D0_49BB_1331_11EBUL;
+        return z ^ (z >> 31);
     }
 
     // ============================================================ ambient / limits
@@ -505,8 +549,7 @@ public sealed partial class ConductorGraph
         if (_dirty && !_bulk) Recompact();
     }
 
-    private static bool KeyLess(in JunctionKey a, in JunctionKey b)
-        => a.Hi != b.Hi ? a.Hi < b.Hi : a.Lo < b.Lo;
+    private static bool KeyLess(in JunctionKey a, in JunctionKey b) => a.CompareTo(b) < 0;
 
     private static string Fmt(in SegmentKey k) => $"{k.Hi:X}:{k.Lo:X}";
 }

@@ -16,6 +16,14 @@ public readonly record struct SegmentKey(ulong Hi, ulong Lo)
 
     /// <summary>The topological identity this segment's realized element carries.</summary>
     internal ExternalKey External() => new(Hi, Lo);
+
+    /// <summary>Canonical lexicographic (Hi, Lo) order (matches <see cref="ExternalKey"/>).</summary>
+    internal int CompareTo(in SegmentKey other)
+    {
+        if (Hi != other.Hi) return Hi < other.Hi ? -1 : 1;
+        if (Lo != other.Lo) return Lo < other.Lo ? -1 : 1;
+        return 0;
+    }
 }
 
 /// <summary>Client-stable identity of one JUNCTION where segments meet (api.md §19).
@@ -26,6 +34,14 @@ public readonly record struct JunctionKey(ulong Hi, ulong Lo)
     public JunctionKey(ulong refId) : this(0, refId) { }
 
     internal ExternalKey External() => new(Hi, Lo);
+
+    /// <summary>Canonical lexicographic (Hi, Lo) order (matches <see cref="ExternalKey"/>).</summary>
+    internal int CompareTo(in JunctionKey other)
+    {
+        if (Hi != other.Hi) return Hi < other.Hi ? -1 : 1;
+        if (Lo != other.Lo) return Lo < other.Lo ? -1 : 1;
+        return 0;
+    }
 }
 
 /// <summary>

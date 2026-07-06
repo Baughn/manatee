@@ -1,7 +1,9 @@
 # Testing Strategy
 
-Last updated: 2026-07-05
-Status: DRAFT.
+Last updated: 2026-07-06
+Status: IMPLEMENTED — the suite described here is built and standing
+(Oracle/, Lessons/, Solver/, Netlist/, Reduction/, State/, Devices/ in
+`core/Manatee.Core.Tests`); the toolchain bullets below are as-shipped.
 
 The team's constraint shapes the whole strategy: nobody here is an
 electrical engineer. Correctness therefore never rests on "we derived it
@@ -40,7 +42,7 @@ the same answer must agree). The math is treated as untrusted input.
 
 ## Toolchain
 
-Settled 2026-07-05, implemented in the repo skeleton:
+Settled 2026-07-05, implemented and in daily use by the full suite:
 
 - **Devshell** (`flake.nix`): `dotnet-sdk_8` + `ngspice`, pinned by
   `flake.lock`; CI runs `nix develop --command`, so CI and local use the
@@ -92,6 +94,15 @@ CI consumes it twice:
 2. **Narrative pass** — machine-readable expectations (a small front-matter
    block per lesson: probe, time, value, tolerance) checked against the
    manatee solution. *A lesson that stops being true fails the build.*
+
+**Corpus population status (2026-07-06):** the gate mechanism is complete and
+auto-discovers new lesson directories; the corpus currently holds lessons
+01–02 (DC) and 04 (RC transient — this is the lesson exercising the transient
+narrative and transient-oracle branches, including the flagship "about 2.7 V
+left across the resistor at 4.5 s" number). The remaining curriculum.md
+lessons (03, 05–17, including the AC/subcycled arc) are **deferred authoring
+work**, not standing coverage — the goldens above assert only what is in the
+corpus today.
 
 The Falstad importer (netlist parser) is thus core infrastructure, not
 tablet polish — it's written first, with the EA examples as its initial
@@ -156,14 +167,37 @@ Two paths, same answer — these carry the compaction layer:
 
 ## Benchmarks
 
-Sparky's discipline carries over: BenchmarkDotNet with MemoryDiagnoser,
-`benchmark.sh`-style compare tooling, and jj commit trailers recording the
-delta against the parent commit.
+Sparky's discipline carries over and is shipped as `scripts/bench.sh`
+(`smoke`/`run`/`compare`): BenchmarkDotNet with MemoryDiagnoser, a jj-aware
+`@` vs `@-` compare that diffs the two report CSVs on Mean and Allocated, and
+jj commit trailers recording the delta against the parent commit.
 
 Standing suites: ladder DC (tier-1 path), switch-toggle refactor (tier-2),
 bulk topology build (tier-3 + Stationeers load-time case, 10k segments),
 subcycled AC island per-tick cost, and the zero-allocation steady-state
 assertion (fails CI if tiers 1–2 allocate after warmup).
+
+**Flake isolation for the zero-alloc gate (operational fact — read before
+adding a ZeroAlloc test).** The alloc assertions read
+`GC.GetAllocatedBytesForCurrentThread`, and that per-thread counter *over-reports*
+when GC/JIT machinery retires this thread's partially-used allocation quantum
+mid-measurement — a step that truly allocates nothing can show a small
+(hundreds-of-bytes) phantom delta. Two sources drive it: (1) concurrent
+compacting GCs from promotion-heavy sibling tests on other xUnit worker threads,
+and (2) *process-wide* background GC and tiered-JIT recompilation that outlive
+any collection boundary (heavy siblings like the ngspice Oracle suites leave
+background GC threads that fire during the measured turn). Every such test lives
+in the serialized `ZeroAlloc` collection (`ZeroAllocCollection`,
+`DisableParallelization = true`), which removes source (1) only. Serialization is
+therefore **best-effort noise reduction, not the correctness mechanism.** The
+sound mechanism — required for every gate in the collection — is
+**min-over-N-sub-runs** (the `TierBudgetGateTests` pattern): the perturbation is
+strictly additive, so a single clean sub-run (min == 0) proves the zero-alloc
+property, whereas a single-shot delta assertion is a flake, not a gate. Also
+warm up first (the first `Factorize` allocates the symbolic pattern; the second
+lands on the frozen-refactor path), and note the gates auto-skip where
+`GC.GetAllocatedBytesForCurrentThread` is inert (historically Mono) — see the
+§8 capability probe, `ZeroAllocGates.CounterIsReliable`.
 
 ## Game-Layer Testing
 

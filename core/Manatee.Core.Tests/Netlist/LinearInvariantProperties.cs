@@ -82,7 +82,7 @@ public sealed class LinearInvariantProperties
                 Assert.True(double.IsFinite(net.ReadCurrent(c)), $"seed {seed}: non-finite current");
                 Assert.True(double.IsFinite(net.ReadPower(c)), $"seed {seed}: non-finite power");
             }
-        }, iter: 300, seed: "0000000000021");   // pinned: seeded RNG only (project rule)
+        }, iter: 300, seed: "0000000000021", threads: 1);   // pinned: seeded RNG only (project rule)
     }
 
     [Fact]
@@ -106,7 +106,7 @@ public sealed class LinearInvariantProperties
             // uncounted in this component sum).
             Assert.True(Math.Abs(sum) <= 1e-6 * Math.Max(scale, 1e-6),
                 $"seed {seed}: power residual {sum:G6} W vs throughput {scale:G6} W");
-        }, iter: 300, seed: "0000000000022");   // pinned: seeded RNG only (project rule)
+        }, iter: 300, seed: "0000000000022", threads: 1);   // pinned: seeded RNG only (project rule)
     }
 
     [Fact]
@@ -127,6 +127,6 @@ public sealed class LinearInvariantProperties
                 $"seed {seed}: KCL residual {report.MaxKclResidual:G6} A exceeds 1e-6 under extreme spread");
             foreach (var c in comps)
                 Assert.True(double.IsFinite(net.ReadCurrent(c)), $"seed {seed}: non-finite current");
-        }, iter: 300, seed: "0000000000023");   // pinned: seeded RNG only (project rule)
+        }, iter: 300, seed: "0000000000023", threads: 1);   // pinned: seeded RNG only (project rule)
     }
 }

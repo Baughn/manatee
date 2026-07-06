@@ -35,43 +35,62 @@ public sealed partial class ConductorGraph
         ReaimProbes();
     }
 
+    // The ONE scratch union-find shape this file needs (BuildRegions and
+    // ComputeBoundary previously hand-rolled the identical structure): Dictionary
+    // over JunctionKey, path-halving find, min-key root. Deliberately NOT a
+    // repo-wide generic — the other union-finds are distinct on purpose
+    // (Netlist.Internal.UnionNodes: persistent eager-relabel with journal events;
+    // Netlist.Couplers.UnitFind: array-based persistent, zero-alloc CollectDirty;
+    // ValidatePartitions: merge-throws). Cold-path scratch; allocation expected.
+    private sealed class JunctionUnionFind
+    {
+        private readonly Dictionary<JunctionKey, JunctionKey> _parent = new();
+
+        public Dictionary<JunctionKey, JunctionKey>.KeyCollection Members => _parent.Keys;
+
+        public void Add(in JunctionKey x)
+        {
+            if (!_parent.ContainsKey(x)) _parent[x] = x;
+        }
+
+        public JunctionKey Find(JunctionKey x)
+        {
+            while (!_parent[x].Equals(x))
+            {
+                _parent[x] = _parent[_parent[x]];   // path halving
+                x = _parent[x];
+            }
+            return x;
+        }
+
+        public void UnionMinKey(in JunctionKey a, in JunctionKey b)
+        {
+            Add(a); Add(b);
+            var ra = Find(a); var rb = Find(b);
+            if (ra.Equals(rb)) return;
+            if (KeyLess(rb, ra)) _parent[ra] = rb; else _parent[rb] = ra;   // min-key root (structural)
+        }
+    }
+
     // ── Region-building: union perfect conductors; representative = min protected
     // junction, else min junction, in the region. ──
     private void BuildRegions()
     {
         _regionOf.Clear();
-        var parent = new Dictionary<JunctionKey, JunctionKey>();
-
-        JunctionKey Find(JunctionKey x)
-        {
-            while (!parent[x].Equals(x))
-            {
-                parent[x] = parent[parent[x]];
-                x = parent[x];
-            }
-            return x;
-        }
-        void Add(JunctionKey x) { if (!parent.ContainsKey(x)) parent[x] = x; }
-        void Union(JunctionKey a, JunctionKey b)
-        {
-            Add(a); Add(b);
-            var ra = Find(a); var rb = Find(b);
-            if (ra.Equals(rb)) return;
-            if (KeyLess(rb, ra)) parent[ra] = rb; else parent[rb] = ra;   // min-key root (structural)
-        }
+        var uf = new JunctionUnionFind();
 
         foreach (var kv in _segs)
         {
-            Add(kv.Value.A); Add(kv.Value.B);
-            if (kv.Value.Ohms <= 0) Union(kv.Value.A, kv.Value.B);        // perfect conductor
+            uf.Add(kv.Value.A); uf.Add(kv.Value.B);
+            if (kv.Value.Ohms <= 0) uf.UnionMinKey(kv.Value.A, kv.Value.B);   // perfect conductor
         }
-        foreach (var j in _protected) Add(j);
+        foreach (var j in _protected) uf.Add(j);
 
         // Group members by structural root, then pick the protected-preferring rep.
         var members = new Dictionary<JunctionKey, List<JunctionKey>>();
-        foreach (var j in parent.Keys)
+        foreach (var j in uf.Members)
         {
-            var r = Find(j);
+            var r = uf.Find(j);
             if (!members.TryGetValue(r, out var list)) { list = new List<JunctionKey>(); members[r] = list; }
             list.Add(j);
         }
@@ -146,21 +165,14 @@ public sealed partial class ConductorGraph
         // A component of all-degree-2, unprotected regions (a pure ring) has no
         // boundary to anchor chains — promote its min-key region so no segment is lost
         // and the walk terminates.
-        var parent = new Dictionary<JunctionKey, JunctionKey>();
-        JunctionKey Find(JunctionKey x) { while (!parent[x].Equals(x)) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
-        void Add(JunctionKey x) { if (!parent.ContainsKey(x)) parent[x] = x; }
-        foreach (var rep in adjacency.Keys) Add(rep);
-        foreach (var e in edges)
-        {
-            Add(e.RA); Add(e.RB);
-            var ra = Find(e.RA); var rb = Find(e.RB);
-            if (!ra.Equals(rb)) { if (KeyLess(rb, ra)) parent[ra] = rb; else parent[rb] = ra; }
-        }
+        var uf = new JunctionUnionFind();
+        foreach (var rep in adjacency.Keys) uf.Add(rep);
+        foreach (var e in edges) uf.UnionMinKey(e.RA, e.RB);
         var compHasBoundary = new Dictionary<JunctionKey, bool>();
         var compMin = new Dictionary<JunctionKey, JunctionKey>();
         foreach (var rep in adjacency.Keys)
         {
-            var root = Find(rep);
+            var root = uf.Find(rep);
             if (!compMin.TryGetValue(root, out var mn) || KeyLess(rep, mn)) compMin[root] = rep;
             if (boundary.Contains(rep)) compHasBoundary[root] = true;
         }
@@ -557,11 +569,9 @@ public sealed partial class ConductorGraph
         t = 0;
     }
 
-    // ── Deterministic comparers ──
-    private static int CompareExternal(ExternalKey a, ExternalKey b)
-        => a.Hi != b.Hi ? a.Hi.CompareTo(b.Hi) : a.Lo.CompareTo(b.Lo);
-    private static int CompareSeg(SegmentKey a, SegmentKey b)
-        => a.Hi != b.Hi ? a.Hi.CompareTo(b.Hi) : a.Lo.CompareTo(b.Lo);
-    private static int CompareJunction(JunctionKey a, JunctionKey b)
-        => a.Hi != b.Hi ? a.Hi.CompareTo(b.Hi) : a.Lo.CompareTo(b.Lo);
+    // ── Deterministic comparers: thin method-group adapters over the key types'
+    // own canonical CompareTo (Handles.cs / Keys.cs) — one ordering definition. ──
+    private static int CompareExternal(ExternalKey a, ExternalKey b) => a.CompareTo(b);
+    private static int CompareSeg(SegmentKey a, SegmentKey b) => a.CompareTo(b);
+    private static int CompareJunction(JunctionKey a, JunctionKey b) => a.CompareTo(b);
 }

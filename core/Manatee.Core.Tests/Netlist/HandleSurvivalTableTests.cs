@@ -6,8 +6,9 @@ namespace Manatee.Core.Tests.Netlist;
 /// <summary>
 /// The handle-survival table (api.md §16) rendered as a test suite: one test per
 /// implementable cell. Columns exercised: Drive [T1], Adjust [T2], Reconfigure
-/// Close (merge), Reconfigure Open (split→rebuild), removal→island rebuild. The
-/// snapshot/restore and drift-resync columns are PHASE-6/7 and marked Skip.
+/// Close (merge), Reconfigure Open (split→rebuild), removal→island rebuild,
+/// snapshot/restore (StateKey re-homing), and drift-resync (probe survival +
+/// derived-key re-resolution).
 ///
 /// Detection convention (debug builds): a surviving internal handle resolves
 /// silently; a stale one throws <see cref="StaleHandleException"/>. Document-level
@@ -289,11 +290,89 @@ public sealed class HandleSurvivalTableTests
 
     // ---------------------------------------------------- PHASE-6 / PHASE-7 columns
 
-    [Fact(Skip = "PHASE-6: snapshot/restore keyed on StateKey (api.md §14) — not in the phase-3 scope.")]
-    public void StateKey_survives_snapshot_restore() { }
+    // §16 snapshot/restore column: StateKey-keyed units restore additively onto the
+    // same island (the deep laws live in State/SnapshotRestoreTests; this pins the
+    // survival-table cell itself). Landed with phase 6; the stub skip is retired.
+    [Fact]
+    public void StateKey_survives_snapshot_restore()
+    {
+        var net = Net();
+        NodeId a, g; CapacitorId cap;
+        using (var e = net.Edit())
+        {
+            a = e.AddNode(K(1)); g = e.AddReferenceNode(K(2));
+            e.AddVoltageSource(a, g, 10.0, K(20));
+            var x = e.AddNode(K(3));
+            e.AddResistor(a, x, 1000.0, K(10));
+            cap = e.AddCapacitor(x, g, 1e-3, K(11), StateKey.From(K(11)));
+        }
+        for (var t = 0; t < 5; t++) net.Solve(new TickClock(t, 0.5));
+        Assert.True(net.TryReadStorageState(cap.AsRef(), out var charged) && charged > 0.1);
 
-    [Fact(Skip = "PHASE-7: drift resync re-creates reduction-owned probes (api.md §16, §19) — reduction layer.")]
-    public void Probe_re_resolves_after_drift_resync() { }
+        var h = net.Islands.Of(a);
+        var w = new System.Buffers.ArrayBufferWriter<byte>(h.SnapshotSize);
+        h.Snapshot(w);
+
+        for (var t = 5; t < 40; t++) net.Solve(new TickClock(t, 0.5));   // keep charging
+        Assert.True(net.TryReadStorageState(cap.AsRef(), out var later) && later > charged);
+
+        var res = net.Islands.Of(a).Restore(w.WrittenSpan);
+        Assert.True(res.Matched >= 1, $"expected the cap unit to match; matched={res.Matched}");
+        Assert.True(net.TryReadStorageState(cap.AsRef(), out var restored));
+        Assert.Equal(charged, restored);   // bit-exact: the unit re-homed by StateKey
+    }
+
+    // §16 drift-resync column: a Resync KEEPS reduction-owned probes and re-aims
+    // them on the SAME handle, and the probe's derived key (ConductorGraph.ProbeKey)
+    // re-resolves to that handle. Landed with the reduction layer + deterministic
+    // probe keys; the stub skip is retired.
+    [Fact]
+    public void Probe_re_resolves_after_drift_resync()
+    {
+        var net = Net();
+        var g = new Manatee.Core.Reduction.ConductorGraph(net, Manatee.Core.Reduction.GraphOptions.SelfPartitioned);
+        var seg = new Manatee.Core.Reduction.SegmentKey(10);
+        var segB = new Manatee.Core.Reduction.SegmentKey(20);
+        var j1 = new Manatee.Core.Reduction.JunctionKey(1);
+        var j2 = new Manatee.Core.Reduction.JunctionKey(2);
+        var j3 = new Manatee.Core.Reduction.JunctionKey(3);
+        using (var b = g.BeginBulkBuild(2))
+        {
+            b.AddSegment(seg, j1, j2, new Manatee.Core.Reduction.ConductorSpec(100, 1));
+            b.AddSegment(segB, j2, j3, new Manatee.Core.Reduction.ConductorSpec(100, 1));
+        }
+        var n1 = g.PortNode(j1);
+        var n3 = g.PortNode(j3);
+        using (var e = net.Edit()) { e.MarkReference(n3); e.AddVoltageSource(n1, n3, 10.0, K(99)); }
+        var probe = g.AddProbe(seg, 0.5);
+        net.SolveOperatingPoint();
+        var before = net.Solution.Read(probe);
+        Assert.True(Math.Abs(before - 7.5) < 1e-6, $"mid-first-segment read {before}");
+
+        // Drift, then resync against the truth. The ProbeId must survive (re-aimed)
+        // and the derived key must resolve to it.
+        g.DebugCorruptSegmentOhms(segB, 150.0);
+        var truth = new[]
+        {
+            new Manatee.Core.Reduction.GeometrySegment(seg, j1, j2, new Manatee.Core.Reduction.ConductorSpec(100, 1)),
+            new Manatee.Core.Reduction.GeometrySegment(segB, j2, j3, new Manatee.Core.Reduction.ConductorSpec(100, 1)),
+        };
+        var rep = g.Resync(net.IslandOf(g.PortNode(j1)), new ArrayGeometry(truth));
+        Assert.True(rep.Ok);
+        net.SolveOperatingPoint();
+
+        Assert.Equal(before, net.Solution.Read(probe), 9);   // same handle, same interior read
+        Assert.True(net.TryResolveProbe(
+            Manatee.Core.Reduction.ConductorGraph.ProbeKey(seg, 0.5), out var resolved));
+        Assert.Equal(probe, resolved);
+    }
+
+    private sealed class ArrayGeometry : Manatee.Core.Reduction.IGeometrySource
+    {
+        private readonly Manatee.Core.Reduction.GeometrySegment[] _segs;
+        public ArrayGeometry(Manatee.Core.Reduction.GeometrySegment[] segs) => _segs = segs;
+        public System.Collections.Generic.IEnumerable<Manatee.Core.Reduction.GeometrySegment> Segments => _segs;
+    }
 
     private static ResistorId Res(Core.Netlist net, ExternalKey key)
     {

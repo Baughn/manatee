@@ -112,6 +112,6 @@ public sealed class AdaptorStabilityProperties
             // No NaN/instability leaked: the bus voltage stays finite and non-negative.
             var vbus = rig.Net.Solution.Voltage(rig.Net.TryResolveNode(K(2), out var b) ? b : default);
             Assert.True(double.IsFinite(vbus) && vbus >= -1e-6, $"bus voltage went unstable: {vbus}");
-        }, iter: 200, seed: "0000000000001");
+        }, iter: 200, seed: "0000000000001", threads: 1);
     }
 }

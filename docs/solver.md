@@ -1,7 +1,9 @@
 # manatee-core: Solver
 
-Last updated: 2026-07-05
-Status: DRAFT — API shape and analysis design; no code yet.
+Last updated: 2026-07-06
+Status: IMPLEMENTED — manatee-core landed 2026-07-06 (Solver/, Netlist.*,
+analyses, islands, coupling). docs/api.md is the canonical as-built public
+surface; this document remains the analysis/design rationale it was built from.
 
 Implements design.md requirements R1–R9. Game-agnostic, pure C#, no engine
 dependencies. Sparky's solver (`sparky/src/mna/`) is the design reference —

@@ -24,6 +24,15 @@ public sealed partial class Netlist
     private const uint FirstGen = 1;                 // gen 0 ⇒ default(TId) is never live
     private const int DefaultChangeCapacity = 256;
 
+    // ε-no-op gate bounds for the DEFAULT ε = 1e-4, pinned as exact bit patterns
+    // (api.md §9; decision log #21): Math.Exp is not correctly rounded and varies per
+    // platform libm (CoreCLR x64 vs arm64 vs Unity Mono), so a value converging near
+    // the boundary could classify as no-op on one runtime and refactor on another,
+    // diverging the §23.5 dual-arch tier-budget goldens. These are the correctly
+    // rounded doubles of exp(∓1e-4) (0x3FEFF2E4B97D31CD / 0x3FF00068DCE3484E).
+    private const double DefaultRatioLo = 0.9999000049998333;   // exp(-1e-4)
+    private const double DefaultRatioHi = 1.0001000050001667;   // exp(+1e-4)
+
     private static int s_netCounter;
 
     private readonly ushort _netId;
@@ -121,9 +130,21 @@ public sealed partial class Netlist
         _profileKind = opts.Profile.Kind;
         _acSamplesPerCycle = opts.Profile.AcSamplesPerCycle > 0 ? opts.Profile.AcSamplesPerCycle : 20;
 
-        var eps = opts.AdjustEpsilon > 0 ? opts.AdjustEpsilon : 1e-4;
-        _ratioLo = System.Math.Exp(-eps);   // cold, construction-time only (never in the gate, §9)
-        _ratioHi = System.Math.Exp(eps);
+        if (opts.AdjustEpsilon > 0 && opts.AdjustEpsilon != 1e-4)
+        {
+            // Custom ε: derive the bounds with a deterministic polynomial (never libm —
+            // §9/decision log #21). 1 ∓ ε + ε²/2 agrees with exp(∓ε) to within ε³/6
+            // (< 1 ulp of band width for ε ≤ 1e-3) and uses only IEEE ± and ×, so the
+            // gate stays bit-identical across runtimes for any ε.
+            var eps = opts.AdjustEpsilon;
+            _ratioLo = 1.0 - eps + 0.5 * eps * eps;
+            _ratioHi = 1.0 + eps + 0.5 * eps * eps;
+        }
+        else
+        {
+            _ratioLo = DefaultRatioLo;   // pinned bit patterns, never recomputed (§9)
+            _ratioHi = DefaultRatioHi;
+        }
 
         _journal = new TopologyJournal(opts.JournalCapacity);
         _chg = new IslandChange[DefaultChangeCapacity];
@@ -193,7 +214,10 @@ public sealed partial class Netlist
 
     // ==================================================================== verbs
 
-    /// <summary>0B; independent voltage-source value (RHS only).</summary>
+    /// <summary>0B; independent voltage-source value (RHS only). On a sine source
+    /// this DEMOTES it to a plain constant source (tier 1 — the live runtime's
+    /// substep loop skips demoted entries, so the constant is never overwritten by
+    /// a stale sine evaluation; api.md §17 "a verb call is never lost").</summary>
     [CostTier(1)]
     public void Drive(VSourceId id, double volts)
     {
@@ -215,19 +239,37 @@ public sealed partial class Netlist
         MarkComponentDirty(slot);
     }
 
-    /// <summary>0B; phase-continuous sine driver. Amplitude/frequency/phase-offset
-    /// update as a tier-1 write; the per-substep RHS evaluation reads them live and
-    /// the accumulated phase is NOT reset — a frequency change keeps phase continuous
-    /// (api.md §4; solver.md). Only the offset in a first Drive after construction can
-    /// shift phase; steady frequency retracking never does.</summary>
+    /// <summary>0B; phase-continuous sine driver. On an already-sine source,
+    /// amplitude/frequency update as a tier-1 write; the per-substep RHS evaluation
+    /// reads them live and the accumulated phase is NOT reset — a frequency change
+    /// keeps phase continuous and <see cref="SineDrive.PhaseRad"/> is IGNORED
+    /// (api.md §4; solver.md). On a plain constant source this PROMOTES it to a sine
+    /// source: a one-time mode change that marks the island's runtime stale (the
+    /// substep sine list is rebuilt at the next solve — tier 2/3 once, honest for a
+    /// mode change) and seeds the phase accumulator from PhaseRad, exactly like
+    /// AddSineSource.</summary>
     [CostTier(1)]
     public void Drive(VSourceId id, in SineDrive d)
     {
         BeginTick();
         if (!ResolveComp(id.AsRef(), out var slot)) return;
+        var wasSine = _cIsSine[slot];
         _cSine[slot] = d; _cIsSine[slot] = true; _cValue[slot] = d.AmplitudeV;
-        // Phase-continuous: _cStateVar (the accumulator) is deliberately left as-is so a
-        // frequency change carries the running phase. The next substep advances from it.
+        if (!wasSine)
+        {
+            // PROMOTION (constant → sine): the live runtime's sine list (rt.SineComps)
+            // is frozen at BuildRuntime, so without a rebuild the source would never
+            // oscillate — the silently-lost-verb failure api.md §17 forbids. Mark the
+            // runtime stale; the next solve rebuilds and restamps from the document.
+            // Seed the phase accumulator from the drive's offset (normalized to
+            // [0, 2π)), matching AddSineSource.
+            var ph0 = d.PhaseRad - TwoPi * System.Math.Floor(d.PhaseRad / TwoPi);
+            _cStateVar[slot] = ph0; _cStatePrev[slot] = ph0;
+            var isl = _nIsland[_cA[slot]];
+            if (isl >= 0) _iRuntimeStale[isl] = true;
+        }
+        // Phase-continuous: on an existing sine source _cStateVar (the accumulator) is
+        // deliberately left as-is so a frequency change carries the running phase.
         MarkComponentDirty(slot);
     }
 

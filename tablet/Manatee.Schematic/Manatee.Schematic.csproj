@@ -1,9 +1,13 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <!-- The tablet's engine: document model, Falstad import, interaction
-         state machine, display-list view. Pure — no UI framework imports;
-         consumed by the Avalonia harness and later the VS mod (net8.0). -->
+    <!-- The tablet's engine: document model, interaction state machine,
+         display-list view (harness.md). Pure — no UI framework imports;
+         consumed by the Avalonia harness and later the VS mod (net8.0).
+         (Falstad import lives in Manatee.Core/Falstad, not here.)
+         Currently empty scaffolding: removed from Manatee.sln until the
+         harness delivery phase starts — re-add with
+         `dotnet sln add tablet/Manatee.Schematic tablet/Manatee.Schematic.Tests`. -->
     <TargetFramework>net8.0</TargetFramework>
     <RootNamespace>Manatee.Schematic</RootNamespace>
   </PropertyGroup>

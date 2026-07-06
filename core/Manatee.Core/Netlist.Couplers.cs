@@ -83,6 +83,26 @@ public sealed partial class Netlist
     private const double DebtBalanceBeta = 0.05;   // EMA weight for the balance detector (τ ≈ 20)
     private const double DroopScaleMin = 1e-4;     // scale floor: keeps the balance ratio non-degenerate
 
+    // TRANSFORMER exchange-damping stability clamp (2026-07-06 final-wave fix). The
+    // boundary exchange is an EXPLICIT damped fixed-point iteration (Jacobi-style:
+    // each side solves against the other side's previous substep), so it converges
+    // only while the loop's damped reflection gain stays below 1. A GAIN-CAPABLE
+    // two-transformer loop (n1·n2 ≤ 1) at low damping (α ≥ ~0.8) crosses that
+    // boundary and grows geometrically — and because the debt droop's reference
+    // E_ref is a peak-hold of the (also geometrically growing) input throughput,
+    // the deadband inflates in lockstep and the droop engages only after
+    // astronomical transients (measured: 1e15–1e73 J on the audit-grid corners,
+    // all α ≥ 0.8 with high store R). The droop bounds ENERGY ACCOUNTING, not the
+    // iteration's spectral radius; the iteration parameter itself must be bounded.
+    // α is therefore clamped to 0.7 for transformer exchanges — the highest value
+    // the exhaustive stability grid (ConservationAuditTests: α × ra × rb × n1 × n2,
+    // gain-capable loops included) verifies dissipative at every corner of the
+    // declared domain. Callers may still pass α ∈ (0,1]; values above the clamp
+    // trade nothing but a slightly slower relaxation. The converter path is NOT
+    // clamped: its charge controller is a provably contracting loop (see
+    // ExchangeConverter) and shows no such instability.
+    private const double TransformerAlphaMax = 0.7;
+
     // Converter DC-link default sizing: a converter with an unspecified (≤0) DC-link is
     // physically nonsensical now that the port IS the cap (ruling), so synthesise an
     // honestly-sized one — a capacitance whose stored energy is one DcLinkDefaultTau of
@@ -459,22 +479,30 @@ public sealed partial class Netlist
         rt.OperatingPoint = operatingPoint;
         if (operatingPoint)
             for (var i = 0; i < rt.SineCount; i++)
-                rt.Circuit.SetVSourceValue(rt.SineStamps[i], 0.0);
+                if (_cIsSine[rt.SineComps[i]])   // demoted-to-constant sources keep their driven value
+                    rt.Circuit.SetVSourceValue(rt.SineStamps[i], 0.0);
         return rt;
     }
 
-    // One substep of a single island (the unit-lockstep analogue of StepTransient's
-    // loop body — same numerics: advance sine phase, write BE history, factorize-if-
-    // dirty + back-substitute, advance companion state). Zero-alloc.
+    // One substep of a single island — THE transient loop body, shared verbatim by
+    // the solo path (StepTransient delegates here) and the unit-lockstep path
+    // (StepUnit): advance sine phase, write BE history, factorize-if-dirty +
+    // back-substitute, advance companion state, energy/taps/limits tail. One body ⇒
+    // the two schedules stay bit-identical by construction. Zero-alloc.
     private SolveStatus AdvanceOneSubstep(IslandRuntime rt, double substepDt, bool operatingPoint)
     {
         if (!operatingPoint)
             for (var i = 0; i < rt.SineCount; i++)
             {
                 var c = rt.SineComps[i];
+                // DEMOTED since the runtime was built (Drive(id, volts) on a sine
+                // source, api.md §17): the document says constant now — Drive already
+                // pushed the RHS; do NOT overwrite it with a stale sine evaluation.
+                // The phase accumulator freezes (a re-promotion reseeds it).
+                if (!_cIsSine[c]) continue;
                 var omega = TwoPi * _cSine[c].FreqHz;
-                var phase = _cStateVar[c] + omega * substepDt;
-                while (phase >= TwoPi) phase -= TwoPi;
+                var phase = _cStateVar[c] + omega * substepDt;     // continuous accumulator
+                while (phase >= TwoPi) phase -= TwoPi;             // wrap (value-preserving; idempotent for any increment)
                 _cStateVar[c] = phase;
                 rt.Circuit.SetVSourceValue(rt.SineStamps[i], _cSine[c].AmplitudeV * Math.Sin(phase));
             }
@@ -593,6 +621,11 @@ public sealed partial class Netlist
 
         var alpha = _kSpec[k].RelaxationAlpha;
         if (!(alpha > 0.0) || alpha > 1.0) alpha = 0.5;
+        // Stability clamp (see TransformerAlphaMax): the transformer exchange is an
+        // explicit fixed-point iteration whose gain-capable-loop convergence is only
+        // verified up to α = 0.7; higher α diverges geometrically faster than the
+        // debt droop can debit. Converter α is unclamped (contracting controller).
+        if (!isConverter && alpha > TransformerAlphaMax) alpha = TransformerAlphaMax;
 
         if (isConverter)
             ExchangeConverter(k, rt, rtA, rtB, substepDt, vA, deliveredByA, alpha);
@@ -963,11 +996,9 @@ public sealed partial class Netlist
             var vAPos = c.ReadPotential(_nCircuitNode[_kAPos[slot]]);
             var vBPos = c.ReadPotential(_nCircuitNode[_kBPos[slot]]);
             var vANeg = c.ReadPotential(_nCircuitNode[_kANeg[slot]]);
-            var vBNeg = c.ReadPotential(_nCircuitNode[_kBNeg[slot]]);
             var iBridge = (vAPos - vBPos) / CouplerBridgeOhms;   // A→B positive when V(APos) > V(BPos)
             var vPort = vAPos - vANeg;
             var powerA2B = vPort * iBridge;
-            _ = vBNeg;
             return new ExchangeView(vAPos, 0.0, vBPos, 0.0, powerA2B);
         }
 

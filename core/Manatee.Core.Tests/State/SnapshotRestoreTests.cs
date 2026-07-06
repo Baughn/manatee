@@ -299,6 +299,6 @@ public sealed class SnapshotRestoreTests
             for (var i = 0; i < vecRef.Length; i++)
                 Assert.True(BitConverter.DoubleToInt64Bits(vecRef[i]) == BitConverter.DoubleToInt64Bits(vecTest[i]),
                     $"row {i}: {vecRef[i]:R} vs {vecTest[i]:R} (not bit-identical)");
-        }, iter: 100, seed: "0000000000001");
+        }, iter: 100, seed: "0000000000001", threads: 1);
     }
 }

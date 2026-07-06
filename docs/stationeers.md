@@ -3,6 +3,19 @@
 Last updated: 2026-07-05
 Status: DRAFT — integration design settled with Sukasa; no code yet.
 
+> **Revision pending (do not treat as canon on the contested points).** After
+> the 2026-07-06 core build, api.md superseded parts of this doc and flagged it
+> for a Sukasa-signed rewrite (api.md §23 item 9). Specifically: the Integration
+> Seams section maps manatee phases onto a per-network 3-phase contract, but the
+> **one-global-tick-body execution model** (api.md §22.a) supersedes it — a
+> single global solve cannot be hosted per-network; the "fires on topology
+> change" incremental-hooks claim doesn't match source (the dirty path tracks
+> device lists, not cable cuts; `RebuildNetwork` is a whole-network flood needing
+> a cable-set diff); and the "galvanic bridge" closed-breaker assertion must
+> carry the api.md §7 vanilla-metric derivation and back-feed caveat. Until this
+> doc is revised and signed off, **api.md §22.a / §7 / §23 are binding** where
+> they disagree with the text below.
+
 Implements design.md R18–R19 plus the core requirements as consumed from
 Stationeers. The integration code lives in Re-Volt's repository (MIT),
 consuming manatee-core as a git submodule. Engine references are to

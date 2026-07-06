@@ -52,10 +52,32 @@ public sealed partial class ConductorGraph
     /// <summary>Rebuild live geometry from the shadow <paramref name="truth"/> and
     /// recompact, restoring probes by their document-stable ids (api.md §19). The
     /// backstop of last resort; after it, the live netlist equals a from-scratch
-    /// build of the truth. Clears the pending <see cref="ResyncNeeded"/> flag.</summary>
+    /// build of the truth. Implements the §19 contract literally — <b>snapshot →
+    /// rebuild from shadow → restore by key</b>: chains whose shape drifted are
+    /// removed and re-added as fresh components by the recompaction, so their evolved
+    /// state (thermal-envelope melting integrals, i²t accumulators) would otherwise
+    /// cold-start; the surrounding snapshot/restore re-homes those units by StateKey
+    /// (the equivalent's key is the min-segment key, which survives while its
+    /// representative segment does — a part-melted reduced cable stays part-melted,
+    /// §14). Clears the pending <see cref="ResyncNeeded"/> flag.</summary>
     public ResyncReport Resync(IslandId island, IGeometrySource truth)
     {
         _ = island;
+
+        // 1. SNAPSHOT every island (cold; the backstop of last resort). Restore is
+        // additive by StateKey, so feeding each blob back after the rebuild re-homes
+        // exactly the units that still exist and orphans the rest — no bookkeeping of
+        // which chain moved where is needed.
+        var blobs = new List<byte[]>();
+        for (var i = 0; i < _net.Islands.Count; i++)
+        {
+            var h = _net.Islands[i];
+            var w = new System.Buffers.ArrayBufferWriter<byte>(System.Math.Max(16, h.SnapshotSize));
+            h.Snapshot(w);
+            blobs.Add(w.WrittenSpan.ToArray());
+        }
+
+        // 2. REBUILD the shadow from truth.
         _segs.Clear();
         _junctionPartition.Clear();
         _refJunction.Clear();
@@ -81,11 +103,36 @@ public sealed partial class ConductorGraph
             };
         }
 
+        // Reconcile _protected against the re-driven truth: retain only junctions the
+        // truth still carries (live ports/taps) plus the reference rails re-created
+        // above — a stale port junction would otherwise stay a boundary node forever
+        // after the geometry that justified it is gone. A device still attached to a
+        // node whose junction vanished from truth is a CLIENT inconsistency; the
+        // recompaction's RemoveNode then fails fast (§20) rather than silently keeping
+        // phantom geometry.
+        _resyncLiveJunctions.Clear();
+        foreach (var kv in _segs)
+        {
+            _resyncLiveJunctions.Add(kv.Value.A);
+            _resyncLiveJunctions.Add(kv.Value.B);
+        }
+        _protected.RemoveWhere(j => !_resyncLiveJunctions.Contains(j) && !_referenceJunctions.Contains(j));
+
         _dirty = true;
         Recompact();
+
+        // 3. RESTORE by key: every blob into every island (additive; misses orphan).
+        for (var i = 0; i < _net.Islands.Count; i++)
+        {
+            var h = _net.Islands[i];
+            foreach (var blob in blobs) h.Restore(blob);
+        }
+
         _resyncNeeded = false;
         return new ResyncReport(_segs.Count, _liveNodeKeys.Count, _liveChains.Count, _probeList.Count, true);
     }
+
+    private readonly HashSet<JunctionKey> _resyncLiveJunctions = new();
 
     // ── Internal test hooks (api.md §19 drift test: "corrupt the graph's internal
     // map deliberately"). Visible only to Manatee.Core.Tests. They mutate the shadow

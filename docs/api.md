@@ -526,6 +526,20 @@ instances of design.md's existing debit rule:
   the honest, legible behavior, not a deadlock. The regulated setpoint is
   the charge controller's target, never an ideal source.
 
+**Transformer relaxation α is clamped to ≤ 0.7 at the exchange (ruled
+2026-07-06, final-wave fix).** The boundary exchange is an explicit damped
+fixed-point iteration; its gain-capable-loop convergence is a NUMERICAL
+stability bound, not something the debt droop can enforce (a runaway grows
+the droop's own peak-hold reference geometrically in lockstep, so the
+deadband inflates with the divergence — measured 1e15–1e73 J transients at
+α ≥ 0.8 with high store R before the clamp). `RelaxationAlpha` still
+accepts (0, 1]; effective transformer damping is `min(α, 0.7)` — the
+highest value the exhaustive stability grid verifies dissipative at every
+corner of the declared domain (α × R × turns, gain-capable loops included;
+`ConservationAuditTests.Gain_capable_loop_stability_grid_has_no_divergent_corner`).
+The converter is unclamped: its charge controller is a provably
+contracting loop.
+
 Conservation tests are **windowed physical audits** (source energy =
 dissipated + Δstored + coupler heat, summed over both islands from public
 readbacks), not `EnergyLedger.Residual` — Residual is a definitional
@@ -643,7 +657,12 @@ correctly-rounded and vary per platform libm, which would let a value
 converging near the ε boundary classify as no-op on x64 and refactor on
 arm64, diverging the `Refactorizations`/`BytesAllocated` goldens §23.5's
 dual-arch CI depends on. Default ε `1e-4` (relative, log-conductance
-domain); the default is benchmark-tunable, the *definition* is not.
+domain); the default is benchmark-tunable, the *definition* is not. As
+built: the default-ε bounds are the correctly-rounded literals of
+`exp(∓1e-4)` (`Netlist.cs` `DefaultRatioLo/Hi`); a custom `AdjustEpsilon`
+derives its bounds with the deterministic polynomial `1 ∓ ε + ε²/2`
+(IEEE ± and × only — agrees with `exp(∓ε)` to within `ε³/6`, and stays
+bit-identical across runtimes, which is the property that matters).
 
 `CostOfAdjust` / `CostOfReconfigure` (§4) answer "what would this cost"
 without applying — Re-Volt's off-band scheduler uses them plus
@@ -853,10 +872,15 @@ rebuild, on the same handle. A drift `Resync` KEEPS reduction-owned probes
 and re-aims them on their existing handles (as built — strictly stronger
 survival than a tear-down/re-create: `ProbeId`s outlive a resync). Only
 `FromCanonical` (which re-mints every handle) forces the client to
-re-resolve via `TryResolveProbe(key)`; reduction-minted probe keys come from
-a per-graph monotone counter — deterministic for a given `AddProbe` call
-order, but NOT derivable from `(SegmentKey, along)` — so clients hold the
-key (or the `ProbeId`) rather than re-deriving it. Sampling costs one struct store per substep, 0B,
+re-resolve via `TryResolveProbe(key)`; reduction-minted probe keys are
+DERIVED deterministically from `(SegmentKey, along, ordinal)` —
+`ConductorGraph.ProbeKey`, a splitmix64 mix under a reserved Hi tag; the
+ordinal counts earlier co-located probes, 0 for the first — so the key is
+topological (§3), two graphs built from the same geometry mint identical
+keys, and a client can RE-DERIVE the key to re-resolve after a reload or a
+re-driven intake (collision posture: birthday-scale in a 64-bit space,
+surfaced by the debug duplicate-key throw at `AddProbe`, never silent).
+Sampling costs one struct store per substep, 0B,
 bounded by the two-probe contract (phase comparisons need a pair).
 `WaveformTap.Attach` is a **cold, call-once subscribe** — it allocates the
 tap object and must live in setup, never in the tick loop (§22.b).
@@ -1275,6 +1299,9 @@ public sealed class ConductorGraph
     public NodeId PortNode(in JunctionKey j);                      // where devices attach post-compaction (key-resolved)
     public NodeId ReferenceNode(PartitionKey p);                   // the network's reference rail (Stationeers datum)
     public ProbeId AddProbe(in SegmentKey k, double along);        // survives collapse via cumulative-R interpolation
+    public static ExternalKey ProbeKey(in SegmentKey k, double along, int ordinal = 0);
+                                                                   // the probe's DERIVED topological identity (§13):
+                                                                   // client-re-derivable, call-order-independent
     public void SetAmbient(in SegmentKey k, double kelvin);        // [T0] envelope recompute ONLY — never a matrix change
     public bool Attribute(in LimitEvent e, out AttributionResult a); // equivalent event → which segment melts/pops (R7); 0B
 
@@ -1359,6 +1386,20 @@ the earliest-tripping raw segment), and OverCurrent parity. Post-first-trip
 streams are NOT compared: the client acts on the first trip, and a
 dominated segment's later raw trip is exactly what the Pareto pruning
 declares unobservable before then.
+
+**The shadow is deliberately NOT serialized (ruled 2026-07-06).**
+`ConductorGraph` has no save/load: geometry is the CLIENT's truth, re-driven
+into a fresh graph at load — matching stationeers.md's rebuild-every-load
+model and compaction.md's from-scratch-is-cheap invariant. What makes the
+re-driven intake converge to the same observable state is that every
+reduction-owned identity is DERIVED from client geometry: equivalent
+resistors key on the chain's min segment key, region nodes on their
+junction keys, and probes on `ProbeKey(segment, along, ordinal)` (§13) — so
+`TryResolve*`/`TryResolveProbe` re-bind client handles after a re-drive with
+no reduction-layer persistence at all. (Evolved SOLVER state — melting
+integrals, coupler runtimes, storage state — persists through the
+netlist-side snapshot/canonical channels of §14, keyed by `StateKey`, which
+is why those keys are geometry-derived too.)
 
 Intake per client: VS voxels → greedy-meshed prisms → union-find regions
 (three block representations, one intake — vintage-story.md); Stationeers
@@ -1742,7 +1783,8 @@ between a CI failure and an in-game Faulted island export.
 
 ## 23. Open items
 
-Carried explicitly; none blocks implementation start.
+Carried explicitly. The core is BUILT (2026-07-06); these are residual
+follow-ups and integration-time verifications, not blockers.
 
 1. **Sukasa sign-off:** `Reconfigure` barred inside `EnterSteadyState`
    (breaker consequences of this tick's limit events land next tick in the
@@ -1761,20 +1803,24 @@ Carried explicitly; none blocks implementation start.
 3. **AdjustEpsilon default (1e-4)** is a guess; the *definition* (§9) is
    pinned, the default is tuned by benchmark/oracle before the tier-budget
    goldens are authored.
-4. **Parameter structs left as named sketches:** `I2tParams`,
-   `GraphOptions`, `SegmentKey`/`JunctionKey` layouts, `DebugLevel`. Roles
-   and homes are fixed; fields fill in at implementation. (`SubstepPlan`
-   fields are now fixed — `Substeps` / `SubstepDt` / `HysteresisBand`, §11.
-   `TransformerParams` = `(TurnsRatio, LeakageOhms, MagnetizingOhms)`,
-   `EfficiencyCurve` = 1–4 `(loadFraction, efficiency)` breakpoints, and
-   `DiodeParams` are now pinned — see `Primitives.cs`/`Couplers.cs`.)
+4. **Parameter structs: all now pinned** (item retained for the record).
+   `SubstepPlan` = `Substeps`/`SubstepDt`/`HysteresisBand` (§11);
+   `TransformerParams` = `(TurnsRatio, LeakageOhms, MagnetizingOhms)`;
+   `EfficiencyCurve` = 1–4 `(loadFraction, efficiency)` breakpoints;
+   `DiodeParams` — see `Primitives.cs`/`Couplers.cs`. `GraphOptions` and the
+   128-bit `SegmentKey`/`JunctionKey` layouts are pinned in
+   `Reduction/Keys.cs`; `DebugLevel` in `Options.cs`; `I2tParams` is realized
+   as the `LimitSpec.Thermal` pair plus the envelope record `I2tPair` (§12).
 5. **Cross-platform FP:** bit-for-bit determinism is scoped to one
    `EnvFingerprint` (runtime/arch/build); CI runs the corpus on x64 and
    arm64 with tolerance diffing. Whether to forbid FMA-contractible patterns
    in the LU kernel to widen the domain is deferred until evidence demands.
-6. **Snapshot format versioning policy:** versioned binary header now; the
-   JSON debug form lives in Diagnostics; migration policy (how many versions
-   back `Restore` accepts) is decided when version 2 exists.
+6. **Snapshot format versioning policy:** versioned binary header shipped —
+   `SnapshotVersion`/`CanonicalVersion` are `3` (`Netlist.State.cs`), and
+   `RestoreIsland` gates *strictly* (rejects any version `!= SnapshotVersion`);
+   the JSON debug form lives in Diagnostics. What stays open is the *migration*
+   policy — how many versions back `Restore` should accept once a shipped save
+   must survive a format bump — deferred until a released client needs it.
 7. **Thermal-RC generalization of `ConductorSpec.OhmsPerLength`** naming:
    deferred (design.md defers the chemistry/thermal arc); the solver-layer
    naming is already domain-neutral.
@@ -1912,9 +1958,8 @@ verified and applied — none rejected):
     composition, so the canon-required `IdealizedTransformer` (solver.md
     component set; tablet AC curriculum) was unbuildable through the public
     surface. `DeviceTickContext.Adjust` now mirrors the full `Netlist.Adjust`
-    set for the same capability-completeness reason. (solver.md's
-    "everything else is a devices-layer composition" sentence needs a
-    one-line amendment to name this primitive.)
+    set for the same capability-completeness reason. (Resolved: solver.md's
+    component-set section names the ideal transformer two-port.)
 24. **One global manatee tick per `ElectricityTick`** (§22.a): the game runs
     the 3-phase contract contiguously per network with no gather point;
     running the body per network would solve N times, mis-drain

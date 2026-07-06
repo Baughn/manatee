@@ -114,6 +114,16 @@ public readonly record struct ExternalKey(ulong Hi, ulong Lo)
     /// devices across rebuilds.</summary>
     public ExternalKey Derive(ushort ordinal)
         => new(Hi, Lo + 0x9E3779B97F4A7C15UL * (ordinal + 1UL));
+
+    /// <summary>Canonical lexicographic (Hi, Lo) order — THE key ordering every
+    /// deterministic sort/min in the core uses. Lives at the type so call sites do
+    /// not re-roll it.</summary>
+    internal int CompareTo(in ExternalKey other)
+    {
+        if (Hi != other.Hi) return Hi < other.Hi ? -1 : 1;
+        if (Lo != other.Lo) return Lo < other.Lo ? -1 : 1;
+        return 0;
+    }
 }
 
 /// <summary>

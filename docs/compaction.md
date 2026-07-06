@@ -1,7 +1,10 @@
 # manatee-core: Reduction Layer ("compaction")
 
-Last updated: 2026-07-05
-Status: DRAFT.
+Last updated: 2026-07-06
+Status: IMPLEMENTED — shipped as `core/Manatee.Core/Reduction/ConductorGraph*`
+(region-building, series collapse, probe interpolation, Pareto i²t envelopes,
+Diff/Resync backstop). api.md §19 is the canonical as-built contract; this
+document remains the design rationale.
 
 Implements design.md R10–R11. Sits between clients and the netlist: clients
 describe conductor geometry at natural granularity (voxels, cable segments,
@@ -44,7 +47,8 @@ to route observations and events back to geometry. Sparky's
 
 ## Incremental Maintenance
 
-Carried over from sparky (design, not code):
+Design carried over from sparky and now implemented in `ConductorGraph`
+(shadow-geometry staging + recompaction diff against the realized netlist):
 
 - Dirty-region tracking at the client's natural chunk size (VS: 16³ blocks;
   Stationeers: per-CableNetwork).

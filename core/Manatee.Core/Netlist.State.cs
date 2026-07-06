@@ -404,8 +404,10 @@ public sealed partial class Netlist
     // smoothing anchors, the values active in the two circuits at the last exchange, and the
     // energy ledger. The transient re-resolved fields (island slots, matrix stamps, local node
     // indices, DcLinkG) are NOT serialized — they are rebuilt by StampBoundaryCouplers, or
-    // re-pushed from these scalars by RepinCouplerStamps on restore. Same 14 scalars the
-    // canonical v2 memento carries (Netlist.State WriteCouplerRuntime), minus its null flag.
+    // re-pushed from these scalars by RepinCouplerStamps on restore. This pair is THE
+    // single scalar list: the canonical memento (WriteCouplerRuntime below) delegates
+    // here, adding only its null flag — one place to grow when a scalar is added
+    // (bump CouplerRuntimeScalars with it).
     private static void WriteCouplerRuntimeScalars(ref SpanWriter w, CouplerRuntime rt)
     {
         w.Double(rt.DcLinkVPrev);
@@ -570,37 +572,24 @@ public sealed partial class Netlist
         w.Flush();
     }
 
-    // Persistent boundary-coupler runtime scalars (canonical v2). These are the
-    // genuinely evolving, non-derived state: the DC-link cap's Backward-Euler history
-    // (the converter's B port IS a capacitor — §7), the transformer debt-droop
-    // integrators, the relaxation smoothing anchors, and the energy ledger. The
-    // transient re-resolved fields (island slots, matrix stamps, local node indices)
-    // are NOT serialized — they are rebuilt by StampBoundaryCouplers on the first solve
-    // after load, which reads these scalars (e.g. the DC-link history) back in.
-    private void WriteCouplerRuntime(ref SpanWriter w, CouplerRuntime? rt)
+    // Persistent boundary-coupler runtime scalars (canonical v2) — the null-flagged
+    // canonical form DELEGATES to the one scalar list above (WriteCouplerRuntimeScalars/
+    // ReadCouplerRuntimeScalars), so adding a 15th evolving scalar touches exactly one
+    // writer + one reader + the CouplerRuntimeScalars count; the per-island snapshot
+    // and the canonical memento can never silently desync (the law-4 carry class of
+    // bug phase 6 closed). Byte format unchanged: same field order, canonical adds
+    // only its leading null flag.
+    private static void WriteCouplerRuntime(ref SpanWriter w, CouplerRuntime? rt)
     {
         w.Bool(rt is not null);
-        if (rt is null) return;
-        w.Double(rt.DcLinkVPrev);
-        w.Double(rt.DebtJ); w.Double(rt.DroopScale);
-        w.Double(rt.TputPeakJ); w.Double(rt.TputEmaJ); w.Double(rt.OverEmaJ);
-        w.Double(rt.VSmooth); w.Double(rt.ISmooth);
-        w.Double(rt.LastVB); w.Double(rt.LastIA); w.Double(rt.LastICharge);
-        w.Double(rt.InJ); w.Double(rt.OutJ); w.Double(rt.ModeledLossJ);
+        if (rt is not null) WriteCouplerRuntimeScalars(ref w, rt);
     }
 
-    private CouplerRuntime? ReadCouplerRuntime(ref SpanReader r)
+    private static CouplerRuntime? ReadCouplerRuntime(ref SpanReader r)
     {
         if (!r.Bool()) return null;
-        var rt = new CouplerRuntime
-        {
-            DcLinkVPrev = r.Double(),
-            DebtJ = r.Double(), DroopScale = r.Double(),
-            TputPeakJ = r.Double(), TputEmaJ = r.Double(), OverEmaJ = r.Double(),
-            VSmooth = r.Double(), ISmooth = r.Double(),
-            LastVB = r.Double(), LastIA = r.Double(), LastICharge = r.Double(),
-            InJ = r.Double(), OutJ = r.Double(), ModeledLossJ = r.Double(),
-        };
+        var rt = new CouplerRuntime();
+        ReadCouplerRuntimeScalars(ref r, rt);
         return rt;
     }
 
@@ -749,6 +738,11 @@ public sealed partial class Netlist
             // StampBoundaryCouplers reuses this same runtime object (EnsureCouplerRuntime
             // returns non-null) and re-resolves them on the first solve after load.
             _kRuntime[i] = ReadCouplerRuntime(ref r);
+            // Runtimes are commit-eager (SnapshotSize stability, api.md §11/§14); a
+            // blob that predates a coupler's first solve still deserializes null, so
+            // re-mint here to keep the state unit present from load onward.
+            if (_kAlive[i] && !_kSpec[i].IsGalvanic && _kRuntime[i] is null)
+                _kRuntime[i] = new CouplerRuntime();
             if (_kAlive[i]) _kKeyMap[_kKey[i]] = i;
         }
         ReadFreeStack(ref r, _kFree);
@@ -847,14 +841,19 @@ public sealed partial class Netlist
             w.Key(_nKey[_kAPos[i]]); w.Key(_nKey[_kANeg[i]]); w.Key(_nKey[_kBPos[i]]); w.Key(_nKey[_kBNeg[i]]);
         }
 
-        // Probes sorted by key; endpoints by node key.
+        // Probes sorted by key; endpoints by node key. A dangling aim (-1: the aimed
+        // node was removed; the probe reads 0 until re-aimed, §13) emits the default
+        // key — deterministic, never a stale slot's key.
         var probes = new List<int>();
         for (var i = 0; i < _pCount; i++) if (_pAlive[i]) probes.Add(i);
         probes.Sort((x, y) => KeyCompare(_pKey[x], _pKey[y]));
         w.Int32(probes.Count);
         foreach (var i in probes)
         {
-            w.Key(_pKey[i]); w.Key(_nKey[_pA[i]]); w.Key(_nKey[_pB[i]]); w.Double(_pT[i]);
+            w.Key(_pKey[i]);
+            w.Key(_pA[i] >= 0 ? _nKey[_pA[i]] : default);
+            w.Key(_pB[i] >= 0 ? _nKey[_pB[i]] : default);
+            w.Double(_pT[i]);
         }
 
         w.Flush();

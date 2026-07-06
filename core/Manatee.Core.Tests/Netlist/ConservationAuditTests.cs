@@ -162,6 +162,93 @@ public sealed class ConservationAuditTests
 
     // ─────────────────────────────────────── gate 1: gain-capable loop DECAYS
 
+    // One point of the gain-capable two-transformer loop rig (shared by the CsCheck
+    // gate below and the exhaustive stability grid): seed energy under drive, cut the
+    // drive, then watch the stored energy for 240 ticks. Returns the seed-time energy,
+    // the post-cut peak, and the final value.
+    private static (double en0, double peak, double final) RunLoopPoint(
+        double alpha, double ra, double rb, double n1, double n2)
+    {
+        var net = Net();
+        NodeId aStore, aGnd, aPort, bStore, bGnd, bPort;
+        ISourceId seed; CouplerId c1, c2;
+        using (var e = net.Edit())
+        {
+            aGnd = e.AddReferenceNode(K(1)); bGnd = e.AddReferenceNode(K(2));
+            aStore = e.AddNode(K(3)); aPort = e.AddNode(K(4));
+            bStore = e.AddNode(K(5)); bPort = e.AddNode(K(6));
+
+            e.AddCapacitor(aStore, aGnd, 1e-3, K(10), StateKey.From(K(10)));
+            e.AddResistor(aStore, aGnd, ra, K(11));
+            e.AddResistor(aPort, aStore, 10.0, K(12));
+            seed = e.AddCurrentSource(aGnd, aStore, 0.5, K(13));
+
+            e.AddCapacitor(bStore, bGnd, 1e-3, K(20), StateKey.From(K(20)));
+            e.AddResistor(bStore, bGnd, rb, K(21));
+            e.AddResistor(bPort, bStore, 10.0, K(22));
+
+            c1 = e.AddCoupler(CouplerSpec.DecouplingTransformer(new TransformerParams(n1), alpha),
+                new CouplerPorts(aStore, aGnd, bPort, bGnd), K(30), StateKey.From(K(30)));
+            c2 = e.AddCoupler(CouplerSpec.DecouplingTransformer(new TransformerParams(n2), alpha),
+                new CouplerPorts(bStore, bGnd, aPort, aGnd), K(31), StateKey.From(K(31)));
+        }
+        net.SolveOperatingPoint();
+        net.Reconfigure(c1, CouplerState.Closed);
+        net.Reconfigure(c2, CouplerState.Closed);
+
+        for (var i = 0; i < 60; i++) net.Solve(new TickClock(5000 + i, 0.05));
+        net.Drive(seed, 0.0);
+
+        double Energy()
+        {
+            var va = net.Solution.Voltage(aStore);
+            var vb = net.Solution.Voltage(bStore);
+            return 0.5 * 1e-3 * va * va + 0.5 * 1e-3 * vb * vb;
+        }
+
+        var en0 = Energy();
+        var peak = 0.0; var last = en0;
+        for (var i = 0; i < 240; i++)
+        {
+            net.Solve(new TickClock(6000 + i, 0.05));
+            var en = Energy();
+            if (!double.IsFinite(en)) return (en0, double.PositiveInfinity, double.PositiveInfinity);
+            if (en > peak) peak = en;
+            last = en;
+        }
+        return (en0, peak, last);
+    }
+
+    [Fact]
+    public void Gain_capable_loop_stability_grid_has_no_divergent_corner()
+    {
+        // THE exhaustive stability grid over the CsCheck gate's DECLARED domain
+        // (alpha in [0.3, 1.0], ra/rb in [50, 300], gain-capable turns n1*n2 <= 1).
+        // History (2026-07-06 final-wave blocker): the debt droop left an unstabilized
+        // hole at alpha >= 0.8 + high store R + loop gain 3-4 — the explicit boundary
+        // fixed-point iteration diverges geometrically at low damping, and the droop's
+        // peak-hold E_ref inflates in lockstep with the runaway, so the deadband never
+        // trips until 1e15-1e73 J transients. CsCheck sampled that ~0.07 % sliver only
+        // rarely (the reported "rare flake"). Fixed by the TransformerAlphaMax = 0.7
+        // exchange-damping clamp (Netlist.Couplers.cs); this grid — 1152 points, every
+        // corner including the nine formerly-divergent tuples — pins it deterministically:
+        // energy must stay bounded (peak <= 3*seed) and decay (final < seed/2) at EVERY point.
+        var failures = new List<string>();
+        foreach (var alpha in new[] { 0.3, 0.5, 0.7, 0.8, 0.85, 0.9, 0.95, 1.0 })
+            foreach (var ra in new[] { 50.0, 150.0, 300.0 })
+                foreach (var rb in new[] { 50.0, 150.0, 300.0 })
+                    foreach (var n1 in new[] { 0.5, 0.6, 0.75, 1.0 })
+                        foreach (var n2 in new[] { 0.5, 0.6, 0.75, 1.0 })
+                        {
+                            if (n1 * n2 > 1.0) continue;
+                            var (en0, peak, final) = RunLoopPoint(alpha, ra, rb, n1, n2);
+                            if (!(peak <= en0 * 3.0 + 1e-12) || !(final < en0 * 0.5 + 1e-12))
+                                failures.Add($"a={alpha} ra={ra} rb={rb} n1={n1} n2={n2}: en0={en0:G6} peak={peak:G6} final={final:G6}");
+                        }
+        Assert.True(failures.Count == 0,
+            $"{failures.Count} divergent grid point(s):\n{string.Join("\n", failures)}");
+    }
+
     [Fact]
     public void Gain_capable_two_coupler_loop_decays_from_seeded_energy()
     {
@@ -245,7 +332,7 @@ public sealed class ConservationAuditTests
             // strongly decayed by the end — the droop made the loop dissipative.
             Assert.True(peak <= en0 * 3.0 + 1e-12, $"n1={n1} n2={n2}: energy ran away (e0={en0:G6} peak={peak:G6})");
             Assert.True(prev < en0 * 0.5 + 1e-12, $"n1={n1} n2={n2}: energy did not decay (e0={en0:G6} final={prev:G6})");
-        }, iter: 40, seed: "0000000000010");
+        }, iter: 40, seed: "0000000000010", threads: 1);
     }
 
     // ─────────────────────────────── gate 2: 5→1 Ω step's windowed audit balances

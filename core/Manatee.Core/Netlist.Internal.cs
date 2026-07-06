@@ -58,8 +58,11 @@ public sealed partial class Netlist
         else { slot = _cCount++; EnsureCompCap(_cCount); _cGen[slot] = FirstGen; }
         // Evolved limit state is slot-parallel, not staged by the Add verbs: a slot
         // reused from the free list would otherwise hand the NEW component the removed
-        // one's melting integral / trip latch / thermal envelope (phase-9 audit fix).
+        // one's melting integral / trip latch / thermal envelope (phase-9 audit fix) —
+        // or its same-tick instantaneous-event coalescing stamp (§12).
         _cI2t[slot] = 0.0; _cI2tTripped[slot] = false; _cEnvCount[slot] = 0;
+        for (var k = 0; k < CoalescedKinds; k++)
+        { _limSeenTick[slot * CoalescedKinds + k] = -1; _limRingPos[slot * CoalescedKinds + k] = 0; }
         return slot;
     }
 
@@ -420,6 +423,13 @@ public sealed partial class Netlist
         foreach (var slot in e.AddedCouplers)
         {
             RegisterKey(_kKeyMap, _kKey[slot], slot);
+            // A boundary coupler's exchange runtime is created AT COMMIT (shape-time),
+            // not lazily at the first Solve: its state unit must exist from the moment
+            // the coupler does, so SnapshotSize/StateUnitCount depend only on document
+            // state and stay stable between IslandChanges (api.md §11/§14; decision
+            // log #15). The matrix stamps inside it are resolved by the next
+            // StampBoundaryCouplers as before.
+            if (!_kSpec[slot].IsGalvanic) EnsureCouplerRuntime(slot);
             if (_kSpec[slot].IsGalvanic && _kStateA[slot] == CouplerState.Closed)
             {
                 UnionNodes(_kAPos[slot], _kBPos[slot]);
@@ -457,6 +467,16 @@ public sealed partial class Netlist
             var iid = new IslandId(isl, _iGen[isl], _netId);
             var seq = _journal.Append(TopologyEventKind.NodeRemoved, default, _nKey[slot], iid, default);
             _iNodeCount[isl]--;
+            // Probes are observers, not topology — they do not hold the node alive.
+            // Invalidate any aim at the removed node to a dangling (-1) endpoint that
+            // reads 0 until re-aimed (Meta.SetProbeInterpolation), so the freed slot's
+            // reuse can never alias the probe onto the new occupant (§13/§20).
+            for (var p = 0; p < _pCount; p++)
+            {
+                if (!_pAlive[p]) continue;
+                if (_pA[p] == slot) _pA[p] = -1;
+                if (_pB[p] == slot) _pB[p] = -1;
+            }
             FreeNodeSlot(slot, TopologyEventKind.NodeRemoved, seq);
             if (_iNodeCount[isl] <= 0)
             {
@@ -506,6 +526,26 @@ public sealed partial class Netlist
                 RollbackAdds(e); _editActive = false;
                 throw new InvalidOperationException(
                     $"RemoveNode: node slot {rn} has degree {deg} at commit (must be 0). The edit was rolled back.");
+            }
+
+            // Coupler ports do not contribute to _nDegree, so degree-0 alone would let
+            // a port node be freed — and the slot's later reuse silently ALIASES the
+            // dangling port onto the new occupant: ApplyReconfigure/RebuildIsland then
+            // union the wrong nodes and corrupt the islanding union-find itself. Per
+            // the §20 RemoveNode row the whole batch aborts, unless the referencing
+            // coupler is removed in the SAME batch. (Probes are observers, not
+            // topology: their dangling aims are invalidated at apply time instead —
+            // see CommitEdit — so they read 0 until re-aimed, never alias.)
+            for (var k = 0; k < _kCount; k++)
+            {
+                if (!_kAlive[k] || e.RemovedCouplers.Contains(k)) continue;
+                if (_kAPos[k] == rn || _kANeg[k] == rn || _kBPos[k] == rn || _kBNeg[k] == rn)
+                {
+                    RollbackAdds(e); _editActive = false;
+                    throw new InvalidOperationException(
+                        $"RemoveNode: node slot {rn} is a port of live coupler slot {k} " +
+                        "(remove the coupler in the same batch first). The edit was rolled back.");
+                }
             }
         }
 
@@ -927,14 +967,11 @@ public sealed partial class Netlist
         _idsDirty = false;
     }
 
-    private static bool KeyLess(in ExternalKey a, in ExternalKey b) => KeyCompare(a, b) < 0;
+    // Thin adapters over ExternalKey's canonical CompareTo (Handles.cs) — one
+    // ordering definition for every deterministic sort/min in the core.
+    private static bool KeyLess(in ExternalKey a, in ExternalKey b) => a.CompareTo(b) < 0;
 
-    private static int KeyCompare(in ExternalKey a, in ExternalKey b)
-    {
-        if (a.Hi != b.Hi) return a.Hi < b.Hi ? -1 : 1;
-        if (a.Lo != b.Lo) return a.Lo < b.Lo ? -1 : 1;
-        return 0;
-    }
+    private static int KeyCompare(in ExternalKey a, in ExternalKey b) => a.CompareTo(b);
 
     // ============================================================ readback
 

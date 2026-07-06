@@ -193,9 +193,11 @@ public sealed partial class Netlist
         // The diodes stamped into this Circuit as linearized companions (Geq ‖ Ieq),
         // contiguous for the Newton loop. DiodeVd carries the working junction voltage
         // (warm-started from the component's persisted state each solve point);
-        // DiodeGeq/DiodeIeq are the LAST-STAMPED values so an unchanged relinearization
+        // DiodeGeq is the LAST-STAMPED conductance so an unchanged relinearization
         // skips the matrix write (value-identical fast path ⇒ a converged nonlinear
         // island re-solves in one iteration with NO refactor — solver.md tier note).
+        // The companion CURRENT has no such latch: TryNewton rewrites it every
+        // iteration by design (RHS-only, never forces a refactor).
         public bool HasNonlinear;
         public int[] DiodeComps = Array.Empty<int>();
         public CompanionStamp[] DiodeStamps = Array.Empty<CompanionStamp>();
@@ -204,7 +206,6 @@ public sealed partial class Netlist
         public double[] DiodeVd = Array.Empty<double>();
         public double[] DiodeVnew = Array.Empty<double>();   // post-solve junction voltage, staged per iteration
         public double[] DiodeGeq = Array.Empty<double>();
-        public double[] DiodeIeq = Array.Empty<double>();
         public int DiodeCount;
 
         // ALL component slots whose A-terminal node belongs to this island (built once
@@ -425,9 +426,11 @@ public sealed partial class Netlist
         // Operating-point convention (§5 lesson start): sine sources sit at their DC
         // offset (0). A storage-free sine island keeps one runtime across op↔transient,
         // so its source may still hold the last transient sample — pin it to 0 here.
+        // A source DEMOTED to a constant since the build keeps its driven value.
         if (operatingPoint)
             for (var i = 0; i < rt.SineCount; i++)
-                rt.Circuit.SetVSourceValue(rt.SineStamps[i], 0.0);
+                if (_cIsSine[rt.SineComps[i]])
+                    rt.Circuit.SetVSourceValue(rt.SineStamps[i], 0.0);
 
         var wasFaulted = _iStatus[slot] == (byte)IslandStatus.Faulted;
         var singleShot = operatingPoint || (n == 1 && !hasSine && !wantCompanions);
@@ -689,61 +692,19 @@ public sealed partial class Netlist
     /// phase and write its RHS, write each companion's Backward-Euler history current,
     /// factorize-if-dirty (a no-op after the first substep — companion conductances are
     /// constant while dt is constant), back-substitute, then update companion state from
-    /// the fresh solution. Zero heap allocation, no per-substep refactor after warmup.</summary>
+    /// the fresh solution. Zero heap allocation, no per-substep refactor after warmup.
+    /// The loop body IS <see cref="AdvanceOneSubstep"/> — the same method the
+    /// boundary-unit lockstep path (StepUnit) drives — so the solo and coupled solve
+    /// paths stay bit-identical by construction, not by parallel maintenance.
+    /// (StepTransient is never called at the operating point, so operatingPoint is
+    /// unconditionally false here; every gate in AdvanceOneSubstep then matches the
+    /// historical inline loop exactly, in the same FP order.)</summary>
     private SolveStatus StepTransient(IslandRuntime rt, int n, double substepDt)
     {
         for (var k = 0; k < n; k++)
         {
-            // ── Sources: advance phase to this substep's end (BE samples t_{n+1}). ──
-            for (var i = 0; i < rt.SineCount; i++)
-            {
-                var c = rt.SineComps[i];
-                var omega = TwoPi * _cSine[c].FreqHz;
-                var phase = _cStateVar[c] + omega * substepDt;     // continuous accumulator
-                while (phase >= TwoPi) phase -= TwoPi;             // wrap (value-preserving; idempotent for any increment)
-                _cStateVar[c] = phase;
-                rt.Circuit.SetVSourceValue(rt.SineStamps[i], _cSine[c].AmplitudeV * Math.Sin(phase));
-            }
-
-            // ── Companions: history current from prior state (tier-1 RHS). ──
-            for (var i = 0; i < rt.CompCount; i++)
-            {
-                var c = rt.CompComps[i];
-                double iEq;
-                if (rt.CompKind[i] == CompCap) iEq = (_cValue[c] / substepDt) * _cStateVar[c];  // G_c·V_prev
-                else iEq = -_cStateVar[c];                                                      // −I_prev
-                rt.Circuit.SetCompanionCurrent(rt.CompStamps[i], iEq);
-            }
-
-            // Linear islands: one factorize (constant companion G ⇒ a no-op after the
-            // first substep) + back-substitution. Nonlinear (diode) islands run the
-            // full Newton loop at this substep's source/companion RHS state.
-            var st = rt.HasNonlinear ? NewtonSolvePoint(rt) : FactorAndSolve(rt);
+            var st = AdvanceOneSubstep(rt, substepDt, operatingPoint: false);
             if (st != SolveStatus.Ok) return st;
-            _lastTickStats.Substeps++;
-
-            // ── Post-solve: advance companion state (cap V = Va−Vb; inductor
-            //    I_{n+1} = G_L·(Va−Vb) + I_n). _cStatePrev keeps V_n for cap readback. ──
-            for (var i = 0; i < rt.CompCount; i++)
-            {
-                var c = rt.CompComps[i];
-                var va = rt.CompLocalA[i] >= 0 ? rt.Circuit.ReadPotential(rt.CompLocalA[i]) : 0.0;
-                var vb = rt.CompLocalB[i] >= 0 ? rt.Circuit.ReadPotential(rt.CompLocalB[i]) : 0.0;
-                _cStatePrev[c] = _cStateVar[c];
-                _cStateVar[c] = rt.CompKind[i] == CompCap
-                    ? va - vb
-                    : (substepDt / _cValue[c]) * (va - vb) + _cStateVar[c];
-            }
-
-            // Energy audit (0B scalar accumulation) + oscilloscope taps + limit scan,
-            // all per substep. Limits MUST run per substep on a subcycled-AC island: i²t
-            // is a genuine ∫I²dt over the cycle (a per-tick scan sees one phase sample ×
-            // the full tick dt — phase-biased, and a fuse whose tick-boundary lands at a
-            // sine zero-crossing would never heat), and the instantaneous OverCurrent/
-            // OverVoltage/OverPower checks must see the waveform peak, not the tick edge.
-            AccumulateIslandEnergy(rt.IslandSlot, substepDt);
-            SampleTaps(rt.IslandSlot);
-            EvaluateIslandLimits(rt.IslandSlot, substepDt, _evalTickIndex);
         }
         return SolveStatus.Ok;
     }
@@ -1080,15 +1041,13 @@ public sealed partial class Netlist
         rt.DiodeVd = new double[rt.DiodeCount];
         rt.DiodeVnew = new double[rt.DiodeCount];
         rt.DiodeGeq = new double[rt.DiodeCount];
-        rt.DiodeIeq = new double[rt.DiodeCount];
         for (var i = 0; i < rt.DiodeCount; i++)
         {
             var cs = rt.DiodeComps[i];
             var vd = _cStateVar[cs];                       // warm start (persisted junction voltage; 0 cold)
             rt.DiodeVd[i] = vd;
-            DiodeLinearize(vd, _cDiode[cs], out var g0, out var id0);
+            DiodeLinearize(vd, _cDiode[cs], out var g0, out _);
             rt.DiodeGeq[i] = g0;                           // baseline matching the build-time companion stamp
-            rt.DiodeIeq[i] = g0 * vd - id0;
         }
         rt.NewtonSave = rt.HasNonlinear ? new double[circuit.Dimension] : Array.Empty<double>();
         rt.MemberComps = _buildMemberComps.ToArray(); rt.MemberCount = _buildMemberComps.Count;
@@ -1263,8 +1222,11 @@ public sealed partial class Netlist
 
     internal void StepIslandNumeric(int slot, uint gen, in TickClock clock)
     {
-        _ = gen;
-        if ((uint)slot >= (uint)_iSlotCount || !_iAlive[slot]) return;
+        // Gen-checked like every other IslandHandle seam (api.md §16/§20): a stale
+        // handle whose slot was freed and reissued to a DIFFERENT island must be an
+        // inert no-op, never Step the new occupant (single-writer violation in
+        // release; a spurious _iStepping assert against an innocent thread in debug).
+        if (!IslandGenLive(slot, gen)) { _lastTickStats.StaleHandleReads++; return; }
 
         if (_tickStatsSealed) { _lastTickStats = default; _tickStatsSealed = false; }
         _evalTickIndex = clock.TickIndex;
@@ -1286,11 +1248,34 @@ public sealed partial class Netlist
                 Debug.Assert(IsUnitLead(slot),
                     "Step on a non-lead member of a boundary-coupled scheduling unit (api.md §11) — Step the unit lead.");
                 if (!IsUnitLead(slot)) return;
-                if (UnitNeedsSolve(slot)) StepUnit(slot, clock.Dt, operatingPoint: false);
+
+                // Structural pass over the unit (mirrors RunSolve): a pending
+                // connectivity rebuild of a NON-LEAD member would otherwise never run
+                // in client-driven Step mode (§22.b — CollectDirty only surfaces the
+                // lead), leaving removed components conducting forever. Rebuilds can
+                // split members out of the unit and even change its lead, so recompute
+                // units and re-resolve the lead afterward.
+                var lead = slot;
+                var rebuiltMember = false;
+                for (var m = 0; m < _iSlotCount; m++)
+                    if (_iAlive[m] && _iUnitLead[m] == slot && _iNeedsRebuild[m])
+                    {
+                        RebuildIsland(m);
+                        _lastTickStats.IslandRebuilds++;
+                        rebuiltMember = true;
+                    }
+                if (rebuiltMember)
+                {
+                    EnsureUnitsFresh();
+                    lead = _iUnitLead[slot];
+                    if (lead < 0) lead = slot;
+                }
+
+                if (UnitNeedsSolve(lead)) StepUnit(lead, clock.Dt, operatingPoint: false);
                 // Limits for every unit member this Step touched (post-solve) — unless the
                 // member already self-scanned per substep this tick (transient members do).
                 for (var m = 0; m < _iSlotCount; m++)
-                    if (_iAlive[m] && _iUnitLead[m] == slot && _iStatus[m] == (byte)IslandStatus.Ready
+                    if (_iAlive[m] && _iUnitLead[m] == lead && _iStatus[m] == (byte)IslandStatus.Ready
                         && !LimitsEvaluatedThisTick(m, clock.TickIndex))
                         EvaluateIslandLimits(m, clock.Dt, clock.TickIndex);
                 return;
@@ -1411,8 +1396,9 @@ public sealed partial class Netlist
 
     internal InvariantReport CheckInvariantsNumeric(int slot, uint gen, InvariantChecks which)
     {
-        _ = gen;
-        if ((uint)slot >= (uint)_iSlotCount || !_iAlive[slot]) return new InvariantReport(0.0, default, true, -1, 0.0);
+        // Gen-checked (api.md §16/§20): a stale handle reads the defined sentinel,
+        // never the slot's new occupant.
+        if (!IslandGenLive(slot, gen)) return new InvariantReport(0.0, default, true, -1, 0.0);
         var rt = _iRuntime[slot];
         if (rt is null || _iStatus[slot] != (byte)IslandStatus.Ready)
             return new InvariantReport(0.0, default, true, -1, 0.0);
@@ -1447,8 +1433,8 @@ public sealed partial class Netlist
     /// any solve, reports a single step at the profile dt.</summary>
     internal SubstepPlan IslandPlanNumeric(int slot, uint gen)
     {
-        _ = gen;
-        if ((uint)slot >= (uint)_iSlotCount || !_iAlive[slot]) return new SubstepPlan(1, _profileDt, 0.0);
+        // Gen-checked (api.md §16/§20): a stale handle reads the default plan.
+        if (!IslandGenLive(slot, gen)) return new SubstepPlan(1, _profileDt, 0.0);
         var n = _iSubstepN[slot] >= 1 ? _iSubstepN[slot] : 1;
         var dt = _iSubstepDt[slot] > 0.0 ? _iSubstepDt[slot] : _profileDt;
         var band = _profileKind == SolverProfile.Regime.Mixed && IslandHasSine(slot) ? SubstepHysteresisBand : 0.0;
@@ -1456,15 +1442,12 @@ public sealed partial class Netlist
     }
 
     internal FaultDiagnostic IslandFaultNumeric(int slot, uint gen)
-    {
-        _ = gen;
-        return (uint)slot < (uint)_iSlotCount && _iAlive[slot] ? _iFault[slot] : default;
-    }
+        // Gen-checked (api.md §16/§20): a stale handle reads default, never the new occupant.
+        => IslandGenLive(slot, gen) ? _iFault[slot] : default;
 
     internal int DescribeFaultNumeric(int slot, uint gen, Span<ComponentRef> comps, Span<NodeId> nodes)
     {
-        _ = gen;
-        if ((uint)slot >= (uint)_iSlotCount || !_iAlive[slot]) return 0;
+        if (!IslandGenLive(slot, gen)) return 0;   // gen-checked (api.md §16/§20)
         var f = _iFault[slot];
         var packed = 0;
         if (f.ComponentCount > 0 && comps.Length > 0) { comps[0] = f.Worst; packed++; }

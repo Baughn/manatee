@@ -197,7 +197,7 @@ public sealed class BoundaryStabilityProperties
             // where both windows are already at machine-noise.
             Assert.True(envLate <= envEarly * (1.0 + 1e-6) + 1e-6 * Math.Max(Math.Abs(pFinal), 1.0),
                 $"alpha={alpha}: envelope grew (early={envEarly:G6} late={envLate:G6})");
-        }, iter: 48, seed: "0000000000001");
+        }, iter: 48, seed: "0000000000001", threads: 1);
     }
 
     [Fact]
@@ -249,7 +249,7 @@ public sealed class BoundaryStabilityProperties
             var envLate = EnvelopeAround(pin, 60, 79, pFinal);
             Assert.True(envLate <= envEarly * (1.0 + 1e-6) + 1e-6 * Math.Max(Math.Abs(pFinal), 1.0),
                 $"alpha={alpha}: converter draw envelope grew (early={envEarly:G6} late={envLate:G6})");
-        }, iter: 36, seed: "0000000000002");
+        }, iter: 36, seed: "0000000000002", threads: 1);
     }
 
     [Fact]
@@ -310,7 +310,7 @@ public sealed class BoundaryStabilityProperties
             var peakLate = DrivePeak(8, ref i, ref high);
             Assert.True(peakLate <= peakEarly * 1.05 + 1e-6,
                 $"alpha={alpha}: square-wave pump grew (early={peakEarly:G6} late={peakLate:G6})");
-        }, iter: 30, seed: "0000000000003");
+        }, iter: 30, seed: "0000000000003", threads: 1);
     }
 
     // Max |sample − reference| over an inclusive index window.
@@ -387,7 +387,7 @@ public sealed class BoundaryStabilityProperties
                 Assert.True(led.OutJ <= led.InJ + led.ModeledLossJ + 1e-9,
                     $"conv={useConverter}: out {led.OutJ} > in {led.InJ} + loss {led.ModeledLossJ} at t={i}");
             }
-        }, iter: 40, seed: "0000000000004");
+        }, iter: 40, seed: "0000000000004", threads: 1);
     }
 
     // ============================================================ 3. dissipativity
@@ -501,7 +501,7 @@ public sealed class BoundaryStabilityProperties
             // Bounded throughout (no runaway) and strongly decayed by the end (dissipative).
             Assert.True(peak <= en0 * 3.0 + 1e-15, $"alpha={alpha}: energy ran away (e0={en0:G6} peak={peak:G6})");
             Assert.True(prev < en0 * 0.01 + 1e-15, $"alpha={alpha}: energy did not decay (e0={en0:G6} final={prev:G6})");
-        }, iter: 24, seed: "0000000000005");
+        }, iter: 24, seed: "0000000000005", threads: 1);
     }
 
     // ============================================================ 4. faulted member
