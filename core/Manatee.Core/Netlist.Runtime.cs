@@ -130,6 +130,43 @@ public sealed partial class Netlist
     private int[] _nCircuitNode = new int[4];   // node slot → local Circuit node index
     private int[] _nRtSlot = new int[4];         // island slot the mapping above is valid for (−1 = none)
 
+    // ── Last-good potential across a merge (api.md §17 rule 4; fixed 2026-07-07) ──
+    // On the tick a merge relabels a node into the survivor island, the node's
+    // _nRtSlot mapping goes stale (the survivor's Circuit has no row for it) and
+    // NodePotential's primary path can no longer serve it. This array carries the
+    // node's LAST-GOOD published potential across that window so the absorbed side
+    // keeps reading real physics — not 0.0 — until the merged island first
+    // publishes. Mechanism choice: a shape-time COPY at merge commit (UnionNodes)
+    // into this slot-parallel array, rather than retaining the absorbed island's
+    // runtime with per-node indirection — the read path stays one extra array load
+    // on the fallback branch (zero-alloc, branch-free on the hot live path), the
+    // absorbed Circuit's lifetime is unchanged (freed at commit, exactly as
+    // before), and chained same-tick merges compose because the capture reads
+    // THROUGH the fallback (an already-held node re-captures its own held value).
+    // Lifetime story: written at merge commit (through the UNGATED last-good
+    // reader — see UnionNodes); consulted only while the node's runtime mapping
+    // is stale; superseded — not cleared — when BuildRuntime revalidates _nRtSlot
+    // at the merged island's next numeric pass (its first publish); reset to 0.0
+    // when a freed node slot is reused (ReserveNodeSlot), so a fresh node never
+    // reads a prior occupant's held value.
+    private double[] _nHeldPotential = new double[4];
+
+    // Companion to _nHeldPotential for VSOURCE AUX FLOWS (branch currents): a
+    // voltage source's aux-row index (_cStamp0) is minted for one specific
+    // Circuit, so through the merge window the absorbed side's flow read has no
+    // valid row in the survivor's vector. Captured at merge commit (UnionNodes)
+    // exactly like node potentials — through the ungated fallback, so chained
+    // same-tick merges compose — and consulted only while the source's node
+    // mapping is stale. Without it, Solution.Current/Power on an absorbed-side
+    // source dips to a fictional 0 for the merge window (the same shape of lie
+    // the potential hold fixes: a battery charge controller or generator
+    // governor keyed on source current would see a one-tick zero on every
+    // breaker close). Same lifetime story as _nHeldPotential; reset on comp slot
+    // reuse (ReserveCompSlot) and on load (FromCanonical). Transformer aux flows
+    // have no readback yet (BranchCurrent default arm) — route them through this
+    // array when they grow one.
+    private double[] _cHeldFlow = new double[8];
+
     // TickStats sealing: a tick's counters accumulate from its first mutation
     // (drive-phase Adjust no-ops included) through Solve; the tick is "sealed" at
     // Solve end and at the LastTickStats readback barrier (§9). The next mutation
@@ -1302,8 +1339,34 @@ public sealed partial class Netlist
     {
         var isl = _nIsland[nodeSlot];
         if (isl < 0) return 0.0;
+        // Faulted reads are de-energized (api.md §10/§20/§17.4, adjudicated and
+        // enforced 2026-07-07): while the island's STATUS is Faulted, potentials
+        // read 0.0 regardless of what its Circuit last published. Status-scoped,
+        // not a taint — the moment a repairing tier-2/3 change or a merge flips
+        // the island back to Dirty, reads revert to ordinary last-good: the last
+        // successfully PUBLISHED vector, which never contains fault output
+        // (failed solves hold the front buffer; the Newton driver restores its
+        // pre-iteration capture — Circuit.Solve / RestoreSolution).
+        if (_iStatus[isl] == (byte)IslandStatus.Faulted) return 0.0;
+        return NodePotentialLastGood(nodeSlot, isl);
+    }
+
+    // The ungated inner read: last-good potential regardless of island status.
+    // The merge capture (UnionNodes) reads through THIS — not the gated wrapper —
+    // so a Faulted absorbed island carries its last-published values (or 0 if it
+    // never published) into the merged Dirty island: exactly what the same island
+    // reads when it survives the union or is retried after a tier-2/3 change, so
+    // the union orientation (which side is larger) stays unobservable.
+    private double NodePotentialLastGood(int nodeSlot, int isl)
+    {
         var rt = _iRuntime[isl];
-        if (rt is null || _nRtSlot[nodeSlot] != isl || _nCircuitNode[nodeSlot] >= rt.NodeCount) return 0.0;
+        if (rt is null || _nRtSlot[nodeSlot] != isl || _nCircuitNode[nodeSlot] >= rt.NodeCount)
+            // No live mapping into this island's Circuit. For a node relabeled by
+            // a merge this is the §17-rule-4 window: hold its captured last-good
+            // potential until the merged island first publishes (BuildRuntime then
+            // revalidates the mapping and the primary path takes over). A node
+            // that never published holds the default 0.0. Zero-alloc either way.
+            return _nHeldPotential[nodeSlot];
         return rt.Circuit.ReadPotential(_nCircuitNode[nodeSlot]);
     }
 
@@ -1311,6 +1374,12 @@ public sealed partial class Netlist
     {
         var kind = (ComponentKind)_cKind[compSlot];
         var a = _cA[compSlot]; var b = _cB[compSlot];
+        // De-energized gate (api.md §20), same status scoping as NodePotential:
+        // every flow read of a Faulted island — potential-derived, state-variable,
+        // driven value, or aux row — reports 0.0 while the fault stands, so
+        // Solution.Current/Power agree with Solution.Voltage about a dead island.
+        var gateIsl = _nIsland[a];
+        if (gateIsl >= 0 && _iStatus[gateIsl] == (byte)IslandStatus.Faulted) return 0.0;
         switch (kind)
         {
             case ComponentKind.Resistor:
@@ -1338,9 +1407,8 @@ public sealed partial class Netlist
             case ComponentKind.VSource:
             {
                 var isl = _nIsland[a];
-                var rt = isl >= 0 ? _iRuntime[isl] : null;
-                if (rt is null || _cStampKind[compSlot] != StampVSource) return 0.0;
-                return rt.Circuit.ReadFlow(_cStamp0[compSlot]);
+                if (isl < 0) return 0.0;
+                return VSourceFlowLastGood(compSlot, isl);
             }
             case ComponentKind.Diode:
                 // The junction current at the converged operating point, anode→cathode.
@@ -1351,6 +1419,44 @@ public sealed partial class Netlist
             default:
                 return 0.0;   // transformer readback: not yet
         }
+    }
+
+    // Ungated inner read for a VSource's aux flow — the same two-tier shape as
+    // NodePotential/NodePotentialLastGood. The merge capture (UnionNodes) reads
+    // through THIS, so chained same-tick merges compose (a source whose mapping is
+    // already stale from an earlier union this tick re-captures its own held flow)
+    // and a Faulted absorbed source carries its last-published branch current, not
+    // a status-gated 0, into the merged Dirty island.
+    private double VSourceFlowLastGood(int compSlot, int isl)
+    {
+        var rt = _iRuntime[isl];
+        if (rt is null || _cStampKind[compSlot] != StampVSource) return 0.0;
+        // Merge window (§17 rule 4): the aux-row stamp was minted for the FREED
+        // island's Circuit, while _nIsland already names the survivor — reading
+        // the survivor's vector at that row would be garbage (or out of range).
+        // Serve the flow captured at merge commit until the merged island's first
+        // publish restamps the source and revalidates the node mapping.
+        if (_nRtSlot[_cA[compSlot]] != isl) return _cHeldFlow[compSlot];
+        return rt.Circuit.ReadFlow(_cStamp0[compSlot]);
+    }
+
+    /// <summary>Test seam (internal): drive a node's island to Faulted exactly as a
+    /// values-only (tier-2, non-rebuilding) failed solve would — status, diagnostic,
+    /// journal event, change record — WITHOUT touching its published vector. A
+    /// deterministic tier-2 singularity is not reachable through the public device
+    /// vocabulary (gmin and milliohm switches keep every values-only system
+    /// nonsingular; structural contradictions rebuild the runtime first, resetting
+    /// the published buffer), but the published-then-faulted shape is reachable via
+    /// Newton divergence in the wild, so the Faulted read gate and the merge-capture
+    /// contract (api.md §17.4/§20) must be pinned for it. Not a public surface.</summary>
+    internal bool TryFaultIslandForTest(NodeId n)
+    {
+        if (!ResolveNode(n, out var slot)) return false;
+        var isl = _nIsland[slot];
+        if (isl < 0 || _iRuntime[isl] is null) return false;
+        FaultIsland(isl, _iRuntime[isl]!, SolveStatus.Diverged,
+                    wasFaulted: _iStatus[isl] == (byte)IslandStatus.Faulted);
+        return true;
     }
 
     /// <summary>Test seam (internal): the current phase-accumulator and instantaneous
@@ -1478,6 +1584,7 @@ public sealed partial class Netlist
         Array.Resize(ref _cStamp0, cap); Array.Resize(ref _cStamp1, cap);
         Array.Resize(ref _cStamp2, cap); Array.Resize(ref _cStamp3, cap);
         Array.Resize(ref _cStamp4, cap); Array.Resize(ref _cStamp5, cap);
+        Array.Resize(ref _cHeldFlow, cap);
     }
 
     private void EnsureNodeMapCap(int min)
@@ -1485,5 +1592,6 @@ public sealed partial class Netlist
         if (_nCircuitNode.Length >= min) return;
         var cap = Math.Max(min, _nCircuitNode.Length * 2);
         Array.Resize(ref _nCircuitNode, cap); Array.Resize(ref _nRtSlot, cap);
+        Array.Resize(ref _nHeldPotential, cap);
     }
 }

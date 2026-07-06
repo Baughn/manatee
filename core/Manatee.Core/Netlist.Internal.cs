@@ -28,6 +28,7 @@ public sealed partial class Netlist
         if (_nFree.Count > 0) { slot = _nFree.Pop(); }
         else { slot = _nCount++; EnsureNodeCap(_nCount); _nGen[slot] = FirstGen; }
         _nRtSlot[slot] = -1;   // no runtime mapping until the island is built
+        _nHeldPotential[slot] = 0.0;   // never a prior occupant's merge-held last-good value
         return slot;
     }
 
@@ -61,6 +62,7 @@ public sealed partial class Netlist
         // one's melting integral / trip latch / thermal envelope (phase-9 audit fix) —
         // or its same-tick instantaneous-event coalescing stamp (§12).
         _cI2t[slot] = 0.0; _cI2tTripped[slot] = false; _cEnvCount[slot] = 0;
+        _cHeldFlow[slot] = 0.0;   // never a prior occupant's merge-held aux flow
         for (var k = 0; k < CoalescedKinds; k++)
         { _limSeenTick[slot * CoalescedKinds + k] = -1; _limRingPos[slot * CoalescedKinds + k] = 0; }
         return slot;
@@ -631,8 +633,32 @@ public sealed partial class Netlist
         int ia = _nIsland[a], ib = _nIsland[b];
         if (ia == ib) return;
         if (_iNodeCount[ia] < _iNodeCount[ib]) { (ia, ib) = (ib, ia); }
+        // Last-good capture for the ABSORBED side (api.md §17 rule 4, fixed
+        // 2026-07-07): the absorbed island's Circuit dies with FreeIslandSlot below,
+        // but its nodes' and voltage sources' handles survive the merge — they must
+        // keep reading their pre-merge published potentials and aux flows (branch
+        // currents), not 0.0, until the merged island first publishes. Capture
+        // BEFORE relabeling, through the UNGATED last-good readers, so (a) a node or
+        // source whose mapping is already stale (a prior merge this same tick)
+        // simply re-captures its own held value — chained merges compose — and (b) a
+        // Faulted absorbed island carries its last successfully PUBLISHED vector, or
+        // 0 if it never published: the merge is the tier-2/3 change that flips
+        // Faulted→Dirty (state machine, api.md §11), and Dirty reads last-good on
+        // BOTH union orientations — the de-energized window is scoped to the Faulted
+        // STATUS (gated in NodePotential/BranchCurrent), never baked into captures,
+        // so which side survives stays unobservable. No fault output can be
+        // laundered either way: failed solves never publish (Circuit.Solve holds the
+        // front buffer; the Newton driver restores its pre-iteration capture). The
+        // writes are slot-parallel array stores: no allocation, deterministic order.
+        for (var c = 0; c < _cCount; c++)
+            if (_cAlive[c] && (ComponentKind)_cKind[c] == ComponentKind.VSource && _nIsland[_cA[c]] == ib)
+                _cHeldFlow[c] = VSourceFlowLastGood(c, ib);
         for (var n = 0; n < _nCount; n++)
-            if (_nAlive[n] && _nIsland[n] == ib) _nIsland[n] = ia;
+            if (_nAlive[n] && _nIsland[n] == ib)
+            {
+                _nHeldPotential[n] = NodePotentialLastGood(n, ib);
+                _nIsland[n] = ia;
+            }
         _iNodeCount[ia] += _iNodeCount[ib];
         // Carry a pending split-rebuild across the merge: if the absorbed island
         // was scheduled to recompute connectivity (a removal), the survivor must

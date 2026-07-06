@@ -1,6 +1,6 @@
 # manatee-core: Netlist API
 
-Last updated: 2026-07-06
+Last updated: 2026-07-07
 Status: CANON pending owner review.
 
 The public surface of manatee-core: the contract every client (Re-Volt
@@ -1128,8 +1128,24 @@ govern different layers, so both hold.
    ever retired without a terminal event (§15 completeness invariant).
 
 4. **What reads observe between mutation and Solve:**
-   - `Solution.*` returns the last **published** solve; Dirty/Building/
-     Faulted islands report `IsLive == false` and hold last-good values.
+   - `Solution.*` returns the last **published** solve: Building/Dirty
+     islands report `IsLive == false` and hold last-good values; a
+     **Faulted** island reports `IsLive == false` and reads **de-energized
+     0** (§10/§20 — enforced at the read path, and scoped to the Faulted
+     *status*: the fault's numbers were never published, and the
+     internally-held pre-fault vector becomes readable again as ordinary
+     last-good once a repairing change or a merge flips the island back to
+     Dirty).
+     Last-good explicitly covers the **absorbed side of a merge** (fixed
+     2026-07-07 after the integration tutorial exposed a violation): nodes
+     relabeled into the survivor keep reading their pre-merge last-good
+     potentials — and voltage sources their branch currents / powers (aux
+     flows) — until the merged island first publishes. This holds on BOTH
+     union orientations, including a previously-Faulted side: the merge is
+     the tier-2/3 change that flips the union to Dirty, so a Faulted
+     side's reads revert from de-energized 0 to its last successfully
+     published values (0 if it never published). No fault output can be
+     laundered this way — failed solves never publish.
    - Structure queries reflect committed topology (rule 1).
    - **Surviving handles in a to-be-rebuilt island stay usable for tier-1/2
      `Drive`/`Adjust` this tick.** These are *document* writes: the pending
@@ -1440,7 +1456,7 @@ Three channels, never blended:
 | Nested `Edit()`; T3/Reconfigure inside guard (debug); missing mandatory key | 1 | `InvalidOperationException` / assert | fix the call site |
 | `RemoveNode` non-degree-0; cross-partition merge (`PartitionMergeException`) | 1 | **throws from `Commit()` — whole batch aborts atomically** | fix the edit; nothing was applied |
 | Single-writer-per-island violation | 1 | debug assert (never a lock) | fix the scheduler |
-| Singular after gmin / contradictory sources / Newton ladder exhausted | 2 | island → `Faulted` + `FaultDiagnostic` (named nodes/components); previous solution held; auto-retry on next T2/T3 change | reads as de-energized; game presents it (VS: "something smells wrong"; tablet: the actual diagnosis) |
+| Singular after gmin / contradictory sources / Newton ladder exhausted | 2 | island → `Faulted` + `FaultDiagnostic` (named nodes/components); previous solution held internally (retry warm-start); auto-retry on next T2/T3 change | reads as de-energized **while Faulted** (status-scoped, enforced at the read path — §17.4; the held pre-fault vector reads again as last-good once a change flips it to Dirty); game presents it (VS: "something smells wrong"; tablet: the actual diagnosis) |
 | Non-finite in a solution vector | 2 | debug assert; release → `Faulted(NonFinite)` | **no NaN ever leaves the API** |
 | Limit exceeded | 3 | `LimitEvent` (drained) | client pops the fuse via `Adjust`/`Reconfigure` |
 | Island merged/rebuilt | 3 | `IslandChange` via `DrainChanges` | re-pin by key (§18) |
@@ -1980,3 +1996,23 @@ verified and applied — none rejected):
     pre-sized netlist ring (grow-on-overflow, counted, never dropped);
     coalesced merges still emit their membership events; `Meta.SetLimits`
     takes `LimitSpec` (the phantom `LimitConfig` type is gone).
+
+Merge-window review round (2026-07-07, adversarial verify of the
+§17.4 last-good fix):
+
+27. **Faulted reads are de-energized, status-scoped, enforced at the read
+    path** (§10/§17.4/§20). Adjudicates the standing §20 tension: the code
+    held the pre-fault published vector readable while Faulted; canon (§10
+    `IsLive` doc, §11 state machine, §20 table) said de-energized. Canon
+    wins: `NodePotential`/`BranchCurrent` gate on `IslandStatus.Faulted`.
+    The scope is the *status*, not a taint — leaving Faulted (retry or
+    merge → Dirty) restores ordinary last-good reads of the last
+    successfully *published* vector, which never contains fault output
+    (failed solves never publish). This makes the merge ruling automatic
+    and symmetric: captures read through ungated inner readers, so both
+    union orientations behave identically and no `absorbedFaulted` special
+    case exists. Merge-window last-good now also covers **voltage-source
+    aux flows** (`Solution.Current`/`Power` on a source): captured
+    per-component at merge commit, same lifetime as held node potentials —
+    an absorbed-side source no longer reads a one-tick 0 A on breaker
+    close.

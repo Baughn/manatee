@@ -117,11 +117,14 @@ internal sealed class TutorialLoad : IDeviceStateUnit
         {
             // SHED on a dead-reading bus — never seek G = P/V² toward GMax at V ≈ 0,
             // where the linearization is meaningless: slamming to GMax stamps a
-            // fictional dead short that pops real fuses. This is load-bearing, not
-            // style: on the tick a breaker Reconfigure(Closed) merges two islands,
-            // BOTH sides' nodes read 0.0 through Previous until the merged island
-            // first publishes (sharp-edges appendix, docs/integration-tutorial.md) —
-            // a GMax-seeking adaptor turns every breaker close into a surge event.
+            // fictional dead short that pops real fuses. Merge ticks no longer read
+            // 0 here (both sides hold last-good until the merged island first
+            // publishes — api.md §17 rule 4, fixed 2026-07-07), so this floor is
+            // pure defense for buses that are GENUINELY dead: de-energized
+            // islands, islands that are Faulted right now (de-energized reads are
+            // status-scoped — a merge or retry flips them to Dirty and their
+            // last-published values return), and the pre-first-publish boot
+            // window (sharp-edges appendix, edge 4, docs/integration-tutorial.md).
             g = GMin;
         }
         else

@@ -10,6 +10,10 @@ namespace Manatee.Core.Tests.Clients;
 /// discipline (stable quiet AdaptedLoads + key-re-pinned active adaptors) must hold under
 /// breaker trips, cable cuts, device churn, a ring overflow, and a Faulted island.
 /// </summary>
+[Collection(Manatee.Core.Tests.ZeroAllocCollection.Name)]   // serialized: the drive phase runs under an armed
+                                                            // AllocationSentinel, and the per-thread GC counter reads
+                                                            // phantom bytes (~8 KB quantum) under sibling-test
+                                                            // compaction/JIT churn (see ZeroAllocCollection)
 public sealed class FakeRevoltClientTests
 {
     // Warm the fleet until the constant-power loads converge (Adjust ε-no-ops).

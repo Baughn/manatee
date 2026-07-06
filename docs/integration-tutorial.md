@@ -1,9 +1,10 @@
 # Integrating manatee-core: a worked tutorial
 
-Last updated: 2026-07-06
+Last updated: 2026-07-07
 Status: tutorial; the API canon is docs/api.md. Where this document and api.md
-disagree, api.md wins — except where this document explicitly flags a
-code-vs-canon divergence (there is one, in §6 and the appendix).
+disagree, api.md wins. (The one code-vs-canon divergence this tutorial found —
+merge-tick reads on the absorbed side — was adjudicated in canon's favor and
+fixed 2026-07-07; see §6 and the appendix, edge 4.)
 
 This is the narrated version of `examples/RevoltWalkthrough/` — a small
 console project that builds a miniature Re-Volt-shaped client and runs it
@@ -317,35 +318,36 @@ The full table is §16; the digest a client needs:
   `StaleHandleException` naming the handle and the journal event that
   killed it.)
 
-**One divergence from canon, flagged (found while building this example).**
-api.md §17 rule 4 says Dirty islands "hold last-good values" until the next
-Solve. As built, that holds for tier-1/2 dirtiness and for pending
-rebuilds, **but not for a pending merge — and only on the absorbed side**:
-on the tick a breaker `Reconfigure(Closed)` is applied, nodes of the
-**absorbed** island read **0.0** through `Solution`/`ctx.Previous` (with
-`IsLive == false`) until the merged island first publishes — through
-perfectly valid handles, so no stale-read counter fires. The **surviving**
-island keeps its identity *and* its last-good published vector, so its
-nodes never dip: the union relabels the absorbed island's nodes into the
-survivor, but they have no entry in the survivor's published solution
-until the post-merge Solve. Which side survives is deterministic but an
-implementation detail (the larger island wins the union; in this example
-NetB survives and NetC dips) — defend both sides.
-A naive `G = P/V²` adaptor that trusts the zero
-computes G → GMax and stamps a fictional dead short: in this example's
-first draft that popped the 6 A fuse with a phantom 597 A surge on the
-merge tick. Until adjudicated (owner review), write adaptors defensively —
-the example's `TutorialLoad` sheds to `GMin` whenever the bus reads below a
-live floor, which is the physically sensible response to "no data" anyway:
+**Merge-tick reads hold last-good on BOTH sides (fixed 2026-07-07).** An
+earlier build violated api.md §17 rule 4 on the absorbed side of a merge:
+on the tick a breaker `Reconfigure(Closed)` was applied, the absorbed
+island's nodes read 0.0 through perfectly valid handles until the merged
+island first published — and a naive `G = P/V²` adaptor that trusted the
+zero stamped a fictional dead short (this example's first draft popped the
+6 A fuse with a phantom 597 A surge on the merge tick). That is fixed and
+the canon promise now holds as written: through the merge window, the
+**survivor** keeps its last-good published vector and the **absorbed**
+island's nodes carry their pre-merge last-good potentials — and its
+voltage sources their branch currents and powers — across the relabel;
+both sides read those values via `Solution`/`ctx.Previous` (with
+`IsLive == false`) until the merged island first publishes at the next
+Solve. A **Faulted** island reads de-energized 0 only *while it is
+Faulted* (api.md §17.4/§20): the merge itself flips the union to Dirty, so
+from the merge commit a previously-Faulted side reads its last
+successfully *published* values again — on either union orientation — and
+0 if it never published. No fault output can leak that way; failed solves
+never publish. Adaptors should still shed below a live floor — genuinely
+dead, Faulted, or never-published buses do legitimately read ~0 V
+(sharp-edges appendix, edge 4):
 
 ```csharp
-if (absV < LiveFloorVolts)   // dead or unpublished bus: shed, never seek GMax
+if (absV < LiveFloorVolts)   // genuinely dead/Faulted bus: shed, never seek GMax
     g = GMin;
 ```
 
-The scripted run shows the benign result: a one-tick 0 W dip on the
-absorbed side only (`B= 400W C=   0W` on the merge tick) instead of a
-surge.
+The scripted run shows the contract holding: no dip at all on the merge
+tick (`B= 400W C= 400W`) — both sides' loads keep their converged
+conductance through the window, and the run's telemetry check pins it.
 
 ## 7. Save/load
 
@@ -400,10 +402,14 @@ signals* (limits, membership changes).
 
 **Faulted islands.** A circuit the solver cannot solve (contradictory
 sources, singular after all remedies) marks its island `Faulted`; every
-read of it is de-energized (`IsLive == false`, voltages 0). Neighbors keep
-solving. `island.Fault` names the worst node/component — feed it to your
-"something smells wrong" UI. Any tier-2/3 change to the island marks it
-Dirty again and it retries automatically. The example's readback checks
+read of it is de-energized (`IsLive == false`, voltages and currents 0)
+for as long as the status stands — enforced at the read path, api.md
+§17.4/§20. Neighbors keep solving. `island.Fault` names the worst
+node/component — feed it to your "something smells wrong" UI. Any tier-2/3
+change to the island marks it Dirty again and it retries automatically
+(from that flip until the retry publishes, reads revert to the island's
+last successfully published values — fault output itself is never
+published, so it is never readable). The example's readback checks
 status first and would run a scalar fallback, mirroring Re-Volt's plan:
 
 ```csharp
@@ -481,15 +487,16 @@ from building the example itself. One line of what, one of why.
 3. **Ignoring `IsLive`.** Building/Dirty/Faulted islands read stale or
    zero values. Gate meaningful readbacks (UI, game logic, adaptor math)
    on it, and write adaptors to tolerate a zero read (edge 4).
-4. **Merge-tick reads on the absorbed side are 0.0, not last-good
-   (code-vs-canon divergence, flagged).** On the tick a breaker Closes,
-   the absorbed island's nodes read 0 through valid handles until the
-   merged island publishes; the surviving island keeps its last-good
-   vector and never dips. api.md §17.4 promises last-good for both; the
-   code disagrees for the absorbed side; reported for adjudication. A
-   G = P/V² adaptor that trusts the zero stamps a fictional short and pops
-   real fuses. Shed below a live floor on both sides — which side survives
-   is an implementation detail (tutorial §6).
+4. **Shed below a live floor — genuinely dead or Faulted buses read 0.**
+   Merge-tick reads hold last-good on both sides, potentials and source
+   currents alike (fixed 2026-07-07, api.md §17.4; tutorial §6), so a
+   breaker Close no longer manufactures zeros — but a bus can still
+   legitimately read ~0 V: a de-energized island, an island that is
+   Faulted *right now* (the de-energized read is status-scoped; a merge
+   or retry flips it to Dirty and its last-published values read again),
+   or the window before an island's first publish. A G = P/V² adaptor
+   that seeks GMax at V ≈ 0 stamps a fictional short and pops real fuses;
+   keep the live-floor shed (`if (absV < LiveFloorVolts) g = GMin;`).
 5. **Caching spans across ticks.** `Islands.Ids`, `RawVector`, drain spans
    — all are views over owner-managed buffers with defined validity
    windows (§21). Copy scalars out; never store a span in a field.

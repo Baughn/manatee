@@ -67,6 +67,8 @@ internal sealed class Walkthrough
     private long _totalStale;
     private int _melts, _cuts, _restoreMatched, _restoreOrphans;
     private TickStats _lastStats;
+    private const long MergeTick = 10;                 // scripted breaker-close tick
+    private double _mergeTickPowerB = -1, _mergeTickPowerC = -1;
 
     // ── Keys: the client-stable identity scheme (tutorial §3). Disjoint ranges per
     //    concept; here they're synthetic, in Re-Volt they pack the game's RefIds. ──
@@ -302,6 +304,14 @@ internal sealed class Walkthrough
 
         // ── 5. Readback phase: apply actuals per partition, drain limits, telemetry. ──
         ApplyStateAndPostTick();
+        // Pin the merge-tick contract (api.md §17 rule 4, fixed 2026-07-07): both
+        // sides held last-good through the drive phase, so nobody shed — the
+        // post-Solve powers stay converged, no 0 W dip on either side.
+        if (clock.TickIndex == MergeTick)
+        {
+            _mergeTickPowerB = ActivePower(NetB);
+            _mergeTickPowerC = ActivePower(NetC);
+        }
         PrintTick(clock.TickIndex);
     }
 
@@ -357,17 +367,20 @@ internal sealed class Walkthrough
             case 8:
                 _pending.Enqueue(("snapshot islands B and C (pre-merge)", SnapshotBAndC));
                 break;
-            case 10:
+            case (int)MergeTick:
                 // Reconfigure(Closed) = incremental merge: component handles SURVIVE,
                 // only the absorbed IslandId dies. The merged island spans two
                 // partitions, so its Partition reads the None sentinel.
-                // Expect a ONE-TICK 0 W dip on the ABSORBED side only (here C; B, the
-                // survivor, keeps its last-good published vector and never dips): until
-                // the merged island first publishes, the absorbed island's nodes read
-                // 0.0 (not last-good) through Solution / Previous, so C's loads shed
-                // for one tick. Which side survives is an implementation detail —
-                // defend both (sharp-edges appendix, edge 4).
-                _pending.Enqueue(("breaker CLOSE -> B+C merge (one-tick readback dip)",
+                // Reads are merge-transparent (api.md §17 rule 4, fixed 2026-07-07):
+                // BOTH sides hold last-good through Solution / ctx.Previous (with
+                // IsLive == false) until the merged island first publishes at this
+                // tick's Solve — the absorbed side carries its pre-merge potentials
+                // AND source branch currents across the relabel, so neither B nor C
+                // dips and the drive phase keeps its converged G = P/V². (Faulted
+                // reads are de-energized only while the island IS Faulted; the
+                // merge flips it to Dirty and its last-published values read again
+                // — sharp-edges appendix, edge 4.)
+                _pending.Enqueue(("breaker CLOSE -> B+C merge (last-good reads, no dip)",
                     () => _net.Reconfigure(_breaker, CouplerState.Closed)));
                 break;
             case 14:
@@ -488,6 +501,9 @@ internal sealed class Walkthrough
         ok &= Check(_melts == 1, $"the fuse melted exactly once (got {_melts})");
         ok &= Check(_restoreMatched == 4 && _restoreOrphans == 0,
             $"additive restore matched all 4 load units, 0 orphans (got {_restoreMatched}/{_restoreOrphans})");
+        ok &= Check(_mergeTickPowerB > 350.0 && _mergeTickPowerC > 350.0,
+            $"merge tick held last-good on BOTH sides -- no 0 W dip " +
+            $"(B={_mergeTickPowerB:F0}W C={_mergeTickPowerC:F0}W; api.md §17.4, fixed 2026-07-07)");
         ok &= Check(_lastStats.Refactorizations == 0 && _lastStats.IslandRebuilds == 0,
             "steady-state tail lives in tier <=1 (0 refactorizations, 0 rebuilds)");
         Console.WriteLine(ok ? "== ALL CHECKS PASSED" : "== CHECKS FAILED");

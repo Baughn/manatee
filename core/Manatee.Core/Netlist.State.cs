@@ -680,6 +680,7 @@ public sealed partial class Netlist
             _nKey[i] = r.Key(); _nIsland[i] = r.Int32(); _nDegree[i] = r.Int32();
             _nInvalidSeq[i] = r.Int64(); _nInvalidKind[i] = r.Byte();
             _nRtSlot[i] = -1;
+            _nHeldPotential[i] = 0.0;   // a load never resurrects pre-load merge holds
             if (_nAlive[i]) _nKeyMap[_nKey[i]] = i;
         }
         ReadFreeStack(ref r, _nFree);
@@ -717,6 +718,7 @@ public sealed partial class Netlist
             }
             _cInvalidSeq[i] = r.Int64(); _cInvalidKind[i] = r.Byte();
             _cStampKind[i] = 0;
+            _cHeldFlow[i] = 0.0;   // a load never resurrects pre-load merge holds
             if (_cAlive[i]) _cKeyMap[_cKey[i]] = i;
         }
         ReadFreeStack(ref r, _cFree);
