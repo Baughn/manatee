@@ -551,3 +551,20 @@ from building the example itself. One line of what, one of why.
     reports `lost == true` and forces a spurious (correct, but confusing)
     full re-pin. Loop `DrainChanges` empty at the end of load
     (tutorial: `FirstSolve`).
+17. **Moving a breaker's ports is one batch: remove + re-add the same
+    key.** Coupler ports are fixed at `AddCoupler`, so re-routing a
+    breaker (a network merge moved one of its sides) is `RemoveCoupler` +
+    `AddCoupler` with the *same* `ExternalKey`/`StateKey`, legal in one
+    atomic batch — removals apply before additions inside a commit
+    (api.md §17.1, decision log #28), so the key resolves to the new
+    handle afterward. For a galvanic breaker nothing else carries over in
+    core: Open/Closed is yours to re-apply, and a re-added breaker
+    defaults **Closed** — if it was tripped open, `Reconfigure(newId,
+    Open)` immediately after the commit, before the next `Solve` (the
+    transient union and the split fold into one coalesced rebuild). Trip
+    accumulation lives in your adaptor, keyed by the game device; it
+    survives untouched — just cache the new `CouplerId`. A *boundary*
+    coupler (transformer/converter) does carry core state
+    (`CouplerRuntime` scalars): snapshot the A-side island before the
+    edit and restore after — same-`StateKey` matching re-attaches it
+    (§7 of this tutorial).

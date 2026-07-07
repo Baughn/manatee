@@ -396,57 +396,16 @@ public sealed partial class Netlist
         // ---- Phase B: apply (cannot fail) ----
         var jFrom = _journal.Head;
 
-        foreach (var slot in e.AddedNodes)
-        {
-            RegisterKey(_nKeyMap, _nKey[slot], slot);
-            var isl = ReserveIslandSlot();
-            _nIsland[slot] = isl; _iNodeCount[isl] = 1;
-            var iid = new IslandId(isl, _iGen[isl], _netId);
-            _journal.Append(TopologyEventKind.IslandCreated, default, _nKey[slot], iid, default);
-            RecordChange(IslandChangeKind.Created, iid, default);
-            _journal.Append(TopologyEventKind.NodeAdded, default, _nKey[slot], iid, default);
-        }
-
-        foreach (var slot in e.AddedComponents)
-        {
-            RegisterKey(_cKeyMap, _cKey[slot], slot);
-            IncDeg(_cA[slot]); IncDeg(_cB[slot]);
-            if (_cC[slot] >= 0) IncDeg(_cC[slot]);
-            if (_cD[slot] >= 0) IncDeg(_cD[slot]);
-            UnionEndpoints(slot);
-            var isl = _nIsland[_cA[slot]];
-            var iid = new IslandId(isl, _iGen[isl], _netId);
-            var kind = (ComponentKind)_cKind[slot];
-            _journal.Append(TopologyEventKind.ComponentAdded,
-                new ComponentRef(kind, slot, _cGen[slot], _netId), _cKey[slot], iid, default);
-            MarkIslandDirty(isl);
-        }
-
-        foreach (var slot in e.AddedCouplers)
-        {
-            RegisterKey(_kKeyMap, _kKey[slot], slot);
-            // A boundary coupler's exchange runtime is created AT COMMIT (shape-time),
-            // not lazily at the first Solve: its state unit must exist from the moment
-            // the coupler does, so SnapshotSize/StateUnitCount depend only on document
-            // state and stay stable between IslandChanges (api.md §11/§14; decision
-            // log #15). The matrix stamps inside it are resolved by the next
-            // StampBoundaryCouplers as before.
-            if (!_kSpec[slot].IsGalvanic) EnsureCouplerRuntime(slot);
-            if (_kSpec[slot].IsGalvanic && _kStateA[slot] == CouplerState.Closed)
-            {
-                UnionNodes(_kAPos[slot], _kBPos[slot]);
-                UnionNodes(_kANeg[slot], _kBNeg[slot]);
-            }
-        }
-
-        foreach (var slot in e.AddedProbes)
-        {
-            RegisterKey(_pKeyMap, _pKey[slot], slot);
-            var isl = _nIsland[_pA[slot]];
-            var iid = isl >= 0 ? new IslandId(isl, _iGen[isl], _netId) : default;
-            _journal.Append(TopologyEventKind.ProbeAdded, default, _pKey[slot], iid, default);
-        }
-
+        // Removals apply BEFORE additions — load-bearing, not stylistic. A batch
+        // that removes an entry and re-adds its ExternalKey (moving a breaker's
+        // ports across a client-side network merge is the canonical case) must
+        // leave the key map pointing at the NEW slot: adds-first would register
+        // the new key and then have the removal's cleanup delete that very entry
+        // (and the debug duplicate-key assert would reject the batch outright).
+        // Journal replayers also get clean replace semantics — Removed(K) then
+        // Added(K), never a transient duplicate key. A removal's pending
+        // split-rebuild mark survives a later add-union: UnionNodes carries the
+        // absorbed island's NeedsRebuild flag to the survivor.
         foreach (var slot in e.RemovedComponents)
         {
             var isl = _nIsland[_cA[slot]];
@@ -503,6 +462,60 @@ public sealed partial class Netlist
             _pKeyMap.Remove(_pKey[slot]);
             _journal.Append(TopologyEventKind.ProbeRemoved, default, _pKey[slot], default, default);
             FreeProbeSlot(slot);
+        }
+
+        foreach (var slot in e.AddedNodes)
+        {
+            RegisterKey(_nKeyMap, _nKey[slot], slot);
+            var isl = ReserveIslandSlot();
+            _nIsland[slot] = isl; _iNodeCount[isl] = 1;
+            var iid = new IslandId(isl, _iGen[isl], _netId);
+            _journal.Append(TopologyEventKind.IslandCreated, default, _nKey[slot], iid, default);
+            RecordChange(IslandChangeKind.Created, iid, default);
+            _journal.Append(TopologyEventKind.NodeAdded, default, _nKey[slot], iid, default);
+        }
+
+        foreach (var slot in e.AddedComponents)
+        {
+            RegisterKey(_cKeyMap, _cKey[slot], slot);
+            IncDeg(_cA[slot]); IncDeg(_cB[slot]);
+            if (_cC[slot] >= 0) IncDeg(_cC[slot]);
+            if (_cD[slot] >= 0) IncDeg(_cD[slot]);
+            UnionEndpoints(slot);
+            var isl = _nIsland[_cA[slot]];
+            var iid = new IslandId(isl, _iGen[isl], _netId);
+            var kind = (ComponentKind)_cKind[slot];
+            _journal.Append(TopologyEventKind.ComponentAdded,
+                new ComponentRef(kind, slot, _cGen[slot], _netId), _cKey[slot], iid, default);
+            MarkIslandDirty(isl);
+        }
+
+        foreach (var slot in e.AddedCouplers)
+        {
+            RegisterKey(_kKeyMap, _kKey[slot], slot);
+            // A boundary coupler's exchange runtime is created AT COMMIT (shape-time),
+            // not lazily at the first Solve: its state unit must exist from the moment
+            // the coupler does, so SnapshotSize/StateUnitCount depend only on document
+            // state and stay stable between IslandChanges (api.md §11/§14; decision
+            // log #15). The matrix stamps inside it are resolved by the next
+            // StampBoundaryCouplers as before.
+            if (!_kSpec[slot].IsGalvanic) EnsureCouplerRuntime(slot);
+            if (_kSpec[slot].IsGalvanic && _kStateA[slot] == CouplerState.Closed)
+            {
+                UnionNodes(_kAPos[slot], _kBPos[slot]);
+                UnionNodes(_kANeg[slot], _kBNeg[slot]);
+            }
+        }
+
+        foreach (var slot in e.AddedProbes)
+        {
+            RegisterKey(_pKeyMap, _pKey[slot], slot);
+            // A same-batch RemoveNode may already have invalidated this staged
+            // probe's aim to -1 (removals apply first): a dangling aim has no
+            // home island to journal and reads 0 until re-aimed (§13/§20).
+            var isl = _pA[slot] >= 0 ? _nIsland[_pA[slot]] : -1;
+            var iid = isl >= 0 ? new IslandId(isl, _iGen[isl], _netId) : default;
+            _journal.Append(TopologyEventKind.ProbeAdded, default, _pKey[slot], iid, default);
         }
 
         var jTo = _journal.Head;

@@ -343,6 +343,91 @@ public sealed class NetlistDocumentTests
         Assert.Equal(br, live);
     }
 
+    // ------------------------------------------------- same-batch key replacement
+    // CommitEdit applies removals BEFORE additions, so one atomic batch may retire
+    // an entry and re-add its ExternalKey — the canonical "move a breaker's ports
+    // across a client-side network merge". These pin the key map ending up on the
+    // NEW slot (adds-first registered the key and then had the removal's cleanup
+    // delete that very entry; DebugLevel.Asserts additionally rejected the batch
+    // as a duplicate key).
+
+    [Fact]
+    public void Coupler_remove_plus_readd_same_key_in_one_batch_resolves_to_the_new_slot()
+    {
+        var net = Debug();
+        NodeId ap, an, bp, bn, cp, cn; CouplerId br;
+        using (var e = net.Edit())
+        {
+            ap = e.AddNode(K(1)); an = e.AddNode(K(2));
+            bp = e.AddNode(K(3)); bn = e.AddNode(K(4));
+            cp = e.AddNode(K(5)); cn = e.AddNode(K(6));
+            e.AddResistor(ap, an, 100, K(10));
+            e.AddResistor(bp, bn, 100, K(11));
+            e.AddResistor(cp, cn, 100, K(12));
+            br = e.AddCoupler(CouplerSpec.Breaker(), new CouplerPorts(ap, an, bp, bn), K(20), StateKey.From(K(20)));
+        }
+        net.SolveOperatingPoint();
+        Assert.Equal(2, net.Islands.Count);        // A+B bridged, C alone
+
+        CouplerId moved;
+        using (var e = net.Edit())
+        {
+            e.RemoveCoupler(br);                    // retire the A↔B bridge…
+            moved = e.AddCoupler(CouplerSpec.Breaker(), new CouplerPorts(ap, an, cp, cn),
+                K(20), StateKey.From(K(20)));       // …and re-key it onto A↔C
+        }
+        net.SolveOperatingPoint();
+
+        Assert.True(net.TryResolveCoupler(K(20), out var live));
+        Assert.Equal(moved, live);
+        Assert.NotEqual(br, live);
+        Assert.Equal(2, net.Islands.Count);        // A+C bridged now, B alone
+    }
+
+    [Fact]
+    public void Component_remove_plus_readd_same_key_in_one_batch_resolves_to_the_new_slot()
+    {
+        var net = Debug();
+        NodeId a, b; ResistorId r;
+        using (var e = net.Edit()) { a = e.AddNode(K(1)); b = e.AddNode(K(2)); r = e.AddResistor(a, b, 100, K(10)); }
+        net.SolveOperatingPoint();
+
+        ResistorId replacement;
+        using (var e = net.Edit())
+        {
+            e.Remove(r);
+            replacement = e.AddResistor(a, b, 50, K(10));
+        }
+        Assert.True(net.TryResolve(K(10), out var live));
+        Assert.Equal(replacement.Slot, live.Slot);
+        Assert.Equal(replacement.Gen, live.Gen);
+        net.SolveOperatingPoint();                 // the batch leaves a solvable document
+    }
+
+    [Fact]
+    public void Probe_added_on_a_node_removed_in_the_same_batch_dangles_and_reads_zero()
+    {
+        // Removals apply first, so the staged probe's aim is invalidated to -1
+        // before the ProbeAdded journal entry is built — the commit must tolerate
+        // the dangling aim (no island to attribute) and the probe reads 0 (§13).
+        var net = Debug();
+        NodeId a, g, c; ProbeId p;
+        using (var e = net.Edit())
+        {
+            a = e.AddNode(K(1)); g = e.AddReferenceNode(K(2)); c = e.AddNode(K(3));
+            e.AddVoltageSource(a, g, 10.0, K(20));
+        }
+        net.SolveOperatingPoint();
+
+        using (var e = net.Edit())
+        {
+            p = e.AddProbe(c, K(30));
+            e.RemoveNode(c);                       // degree-0; the staged aim dangles
+        }
+        net.SolveOperatingPoint();
+        Assert.Equal(0.0, net.Solution.Read(p));
+    }
+
     [Fact]
     public void DrainChanges_reports_created_and_merged()
     {

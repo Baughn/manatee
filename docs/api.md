@@ -1109,7 +1109,13 @@ govern different layers, so both hold.
    before any Solve — `TryResolve`, `IslandOf`, `Islands.Ids`, node degree,
    `Fingerprint`, and the journal window all reflect the committed topology.
    Added handles are valid immediately; the removed component's slot is
-   freed immediately.
+   freed immediately. Within one commit, **removals apply before
+   additions**, so a single batch may retire an entry and re-add its
+   `ExternalKey` on new endpoints — the breaker-move case:
+   `RemoveCoupler` + `AddCoupler` with the same key in one batch, after
+   which the key resolves to the new handle (decision log #28). Journal
+   replayers correspondingly see `Removed(K)` before `Added(K)` within a
+   commit window, never a transient duplicate key.
 
 2. **Matrices are coalesced.** Commit does not refactor. Affected islands go
    `Dirty`; the symbolic+numeric rebuild runs at the next `Solve`, **once
@@ -2016,3 +2022,20 @@ Merge-window review round (2026-07-07, adversarial verify of the
     per-component at merge commit, same lifetime as held node potentials —
     an absorbed-side source no longer reads a one-tick 0 A on breaker
     close.
+
+Commit-order round (2026-07-07):
+
+28. **Within-commit apply order is removals-then-additions** (§17.1). The
+    overnight build applied adds first — incidental, no dependency
+    required it (slots are reserved at staging, so orders can't collide;
+    validation is already batch-net; a removal's pending rebuild mark is
+    carried across a later add-union by `UnionNodes`). Adds-first broke
+    the same-batch remove + re-add-same-`ExternalKey` pattern: the
+    removal's key-map cleanup deleted the *new* registration (release) or
+    the duplicate-key assert rejected the batch (debug), forcing the
+    breaker-move operation into two commits for no reason. Removes-first
+    fixes that and gives journal replayers clean replace semantics. One
+    guard rode along: a probe staged in the same batch as its aimed
+    node's removal has its aim invalidated to −1 *before* `ProbeAdded` is
+    journaled, so the apply path tolerates a dangling aim (reads 0 until
+    re-aimed, §13 — same contract as post-commit invalidation).
