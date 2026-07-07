@@ -50,7 +50,7 @@ to route observations and events back to geometry. Sparky's
 Design carried over from sparky and now implemented in `ConductorGraph`
 (shadow-geometry staging + recompaction diff against the realized netlist):
 
-- Dirty-region tracking at the client's natural chunk size (VS: 16³ blocks;
+- Dirty-region tracking at the client's natural chunk size (VS: 32³ blocks;
   Stationeers: per-CableNetwork).
 - Merge pre-check: would the new geometry bridge >1 existing region? If so,
   full rebuild of the affected island; otherwise the incremental path.

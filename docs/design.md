@@ -438,7 +438,10 @@ deleting the wire-gauge economics. Deliberate wetting (a pool over the
 rod) stays legal; it's real practice and a fair reward.
 **Ground-return (SWER) becomes a user-visible choice, not the
 default** — it earns its keep exactly where the real arithmetic works:
-high-voltage distribution (240 V long runs), and milliamp signalling
+high-voltage distribution (real SWER runs at medium voltage, ~12.7 kV
+or 19.1 kV line-to-earth; the game's 240 V tier is the game-scale
+stand-in, where the fractional loss P·R/V² is much improved over 12 V
+though still material for full power loads), and milliamp signalling
 (telegraph, doorbell, electric fences — historically accurate SWER
 territory). The curriculum lesson reframes accordingly: not "this is
 how wiring works" but *"copper is expensive — when can you get away

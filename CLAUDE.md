@@ -29,6 +29,7 @@ binding as-built surface. Next: 2D schematic harness, then Re-Volt / VS.
 | `docs/curriculum.md` | Tablet lesson arc (17 lessons, DC → AC power) and authoring rules. |
 | `docs/falstad-format.md` | Falstad/circuitjs1 text-format spec (from source), EA dialect, importer accept/reject contract. |
 | `docs/experiments/` | Dated experiment reports and the API-competition proposals/synthesis — decision inputs, not canon. |
+| `docs/glossary.md` | Dual-audience glossary (programmers ↔ EEs): index, nonstandard→standard nomenclature table; entries in `docs/glossary/` by category, with literature references. |
 
 `third_party/` holds reference checkouts and the Stationeers decompilation —
 see `third_party/CLAUDE.md` for what's there and the decompile caveats.

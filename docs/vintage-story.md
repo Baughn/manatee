@@ -82,8 +82,9 @@ a custom `ChiselMode`. Server authority runs through packet 1010
 
 **Re-chiselability.** `ItemChisel.IsChiselingAllowedFor` (:298) only permits
 chiseling `BlockChisel` instances — plain microblocks can't be re-chiseled.
-Cable-bearing blocks must remain `BlockChisel` (or carry `canChisel`) to stay
-editable.
+Cable-bearing blocks must remain `BlockChisel` to stay editable
+(`canChisel` only governs converting a non-microblock block into a
+`chiseledblock`, not re-editing an existing microblock).
 
 **Decor layer.** The microblock BE implements `IAcceptsDecor`
 (`BEMicroBlock.cs:74, :2485–2500`); the chunk decor layer supports per-face
@@ -255,8 +256,11 @@ Two mechanisms, both needed:
   (representation chosen by wire-voxel count between supports) plugs in
   here: short spans render as voxel geometry, long spans as catenary curves.
   Gotchas: generous `RenderRange` for long spans; the cloth system
-  deliberately avoids region-boundary spans (`ClothManager.cs:583-585`) —
-  wire persistence must respect the same limit or handle it explicitly.
+  persists each span into the single map region containing its start
+  point (`ClothManager.cs:588-606`, keyed on `cs.FirstPoint.Pos`), and
+  its own comments (`ClothManager.cs:583-585`) flag cross-region spans
+  as an unhandled open question — wire persistence must not inherit that
+  gap: either avoid region-boundary spans or handle them explicitly.
 
 ## The Tablet Host
 
